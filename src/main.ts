@@ -624,6 +624,11 @@ function exitLightbox() {
 /** 打开图片后自动进入灯箱（用户主动退出后不再自动，新开文件时重置） */
 async function autoLightboxOnce() {
   if (!entries.length || lightboxOn || suppressAutoLightbox) return;
+  const w = getCurrentWindow();
+  if (await w.isFullscreen()) {
+    enterLightbox(); // 窗口按配置已全屏，只挂灯箱样式
+    return;
+  }
   await applyFullscreen(true);
 }
 
@@ -777,6 +782,8 @@ document.body.classList.add("has-strip");
     const args = await invoke<string[]>("cli_args");
     const target = args.find((a) => a && !a.startsWith("-"));
     if (target) {
+      // 窗口本身已按配置全屏，这里直接挂灯箱样式，首帧即蒙板+胶片条
+      enterLightbox();
       await openPath(target);
       return;
     }
