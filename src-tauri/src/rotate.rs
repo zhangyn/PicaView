@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use image::DynamicImage;
+use image::{DynamicImage, ImageFormat};
 
 #[tauri::command]
 pub async fn rotate(path: String, clockwise: bool) -> Result<(), String> {
@@ -15,16 +15,26 @@ pub async fn rotate(path: String, clockwise: bool) -> Result<(), String> {
     if !crate::imgscan::is_image_ext(&ext) {
         return Err("不是支持的图片格式".into());
     }
-    if matches!(ext.as_str(), "gif" | "webp" | "png")
-        && crate::imgscan::detect_animated(p, &ext)
-    {
+    if matches!(ext.as_str(), "gif" | "webp" | "png") && crate::imgscan::detect_animated(p, &ext) {
         return Err("动图暂不支持旋转".into());
     }
 
-    match ext.as_str() {
-        "jpg" | "jpeg" => rotate_jpeg_lossless(p, clockwise),
-        _ => rotate_reencode(p, &ext, clockwise),
+    // 按内容嗅探真实格式（扩展名可能不可信）
+    let fmt = sniff(p)?;
+    match fmt {
+        ImageFormat::Jpeg => rotate_jpeg_lossless(p, clockwise),
+        f => rotate_reencode(p, f, clockwise),
     }
+}
+
+/// 按文件内容（magic bytes）识别格式
+fn sniff(p: &Path) -> Result<ImageFormat, String> {
+    let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    image::ImageReader::new(std::io::BufReader::new(f))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .format()
+        .ok_or_else(|| "无法识别图片格式".to_string())
 }
 
 /// libjpeg-turbo tjTransform：只变换 DCT 系数，像素级无损
@@ -36,16 +46,20 @@ fn rotate_jpeg_lossless(p: &Path, clockwise: bool) -> Result<(), String> {
         turbojpeg::TransformOp::Rot270
     });
     // tjTransform 默认复制 EXIF 等 marker（copy_none=false）
-    let out =
-        turbojpeg::transform(&xform, &src).map_err(|e| format!("JPEG 旋转失败: {e}"))?;
+    let out = turbojpeg::transform(&xform, &src).map_err(|e| format!("JPEG 旋转失败: {e}"))?;
     let mut out = out.to_vec();
     // 方向信息已过时，复位为 1
     fix_orientation_to_one(&mut out);
     replace_file(p, &out)
 }
 
-fn rotate_reencode(p: &Path, ext: &str, clockwise: bool) -> Result<(), String> {
-    let img = image::open(p).map_err(|e| format!("解码失败: {e}"))?;
+fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), String> {
+    let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
+    let img = image::ImageReader::new(std::io::BufReader::new(f))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| format!("解码失败: {e}"))?;
     let img = crate::exifinfo::oriented_dynamic(img, &p.to_string_lossy());
     let rotated: DynamicImage = if clockwise {
         img.rotate90()
@@ -53,21 +67,15 @@ fn rotate_reencode(p: &Path, ext: &str, clockwise: bool) -> Result<(), String> {
         img.rotate270()
     };
     let mut out = Vec::new();
-    match ext {
-        "webp" => {
+    match fmt {
+        ImageFormat::WebP => {
             // image 的 WebP 编码器仅支持无损
             let enc = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
             let color = image::ExtendedColorType::from(rotated.color());
             enc.encode(rotated.as_bytes(), rotated.width(), rotated.height(), color)
                 .map_err(|e| format!("WebP 编码失败: {e}"))?;
         }
-        fmt_name => {
-            let fmt = match fmt_name {
-                "png" => image::ImageFormat::Png,
-                "bmp" => image::ImageFormat::Bmp,
-                "gif" => image::ImageFormat::Gif,
-                _ => return Err("不支持的格式".into()),
-            };
+        _ => {
             rotated
                 .write_to(&mut Cursor::new(&mut out), fmt)
                 .map_err(|e| format!("编码失败: {e}"))?;
@@ -131,10 +139,7 @@ fn fix_orientation_to_one(jpeg: &mut [u8]) {
             return;
         }
         // APP1 且内容以 "Exif\0\0" 开头
-        if marker == 0xE1
-            && i + 10 <= jpeg.len()
-            && &jpeg[i + 4..i + 10] == b"Exif\0\0"
-        {
+        if marker == 0xE1 && i + 10 <= jpeg.len() && &jpeg[i + 4..i + 10] == b"Exif\0\0" {
             if set_orientation_in_tiff(jpeg, i + 10) {
                 return;
             }

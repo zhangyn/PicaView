@@ -10,6 +10,7 @@ const THUMB_MAX: u32 = 240;
 
 #[tauri::command]
 pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, String> {
+    let t0 = std::time::Instant::now();
     let cache_dir = app
         .path()
         .app_cache_dir()
@@ -19,7 +20,13 @@ pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, 
 
     // 缓存键 = hash(路径 + mtime纳秒 + 大小)，文件一变自动失效
     let p = PathBuf::from(&path);
-    let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    let md = match std::fs::metadata(&p) {
+        Ok(m) => m,
+        Err(e) => {
+            crate::imgscan::diag_log(&app, &format!("THUMB STAT FAIL {path}: {e}"));
+            return Err(e.to_string());
+        }
+    };
     let mtime = md
         .modified()
         .map_err(|e| e.to_string())?
@@ -38,13 +45,30 @@ pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, 
         }
     }
 
-    let bytes = generate(&p)?;
-    let _ = std::fs::write(&cache_file, &bytes);
-    Ok(Response::new(bytes))
+    match generate(&p) {
+        Ok(bytes) => {
+            crate::imgscan::diag_log(
+                &app,
+                &format!("THUMB OK {} ({}B, {}ms)", path, bytes.len(), t0.elapsed().as_millis()),
+            );
+            let _ = std::fs::write(&cache_file, &bytes);
+            Ok(Response::new(bytes))
+        }
+        Err(e) => {
+            crate::imgscan::diag_log(&app, &format!("THUMB FAIL {path}: {e}"));
+            Err(e)
+        }
+    }
 }
 
 fn generate(p: &Path) -> Result<Vec<u8>, String> {
-    let img = image::open(p).map_err(|e| format!("解码失败: {e}"))?;
+    // 按内容嗅探格式：网上下载的图常见「.png 扩展名 + JPEG 内容」
+    let f = std::fs::File::open(p).map_err(|e| format!("打开失败: {e}"))?;
+    let img = image::ImageReader::new(std::io::BufReader::new(f))
+        .with_guessed_format()
+        .map_err(|e| format!("格式识别失败: {e}"))?
+        .decode()
+        .map_err(|e| format!("解码失败: {e}"))?;
     let img = crate::exifinfo::oriented_dynamic(img, &p.to_string_lossy());
     let small = if img.width().max(img.height()) > THUMB_MAX {
         img.thumbnail(THUMB_MAX, THUMB_MAX) // box 滤镜，缩略图足够

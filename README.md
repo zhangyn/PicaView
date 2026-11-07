@@ -1,6 +1,6 @@
 # PicaView
 
-极简看图软件——复刻 Google Picasa「查看器」的体验：快、顺滑、只看图。
+极简看图软件：快、顺滑、只看图。
 无图库、无相册、无人脸、无编辑、无联网。
 
 ![tech](https://img.shields.io/badge/Tauri-2-blue) ![platform](https://img.shields.io/badge/Windows-10%2F11-lightgrey)

@@ -272,19 +272,28 @@ export class Viewer {
     ctx.clearRect(0, 0, c.width, c.height);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(bmp, p.tx, p.ty, p.iw * p.scale, p.ih * p.scale);
-    if (this.maskOn) this.drawMask(ctx, p);
+    if (this.maskOn) {
+      // 灯箱模式：先铺暗蒙板，再带投影绘制图片
+      this.fillMask(ctx, p);
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,0.65)";
+      ctx.shadowBlur = 36 * this.dpr;
+      ctx.drawImage(bmp, p.tx, p.ty, p.iw * p.scale, p.ih * p.scale);
+      ctx.restore();
+    } else {
+      ctx.drawImage(bmp, p.tx, p.ty, p.iw * p.scale, p.ih * p.scale);
+    }
   }
 
-  /** 图片外区域画灰色半透明蒙板（canvas 路径） */
-  private drawMask(ctx: CanvasRenderingContext2D, p: Placement) {
+  /** 图片外区域铺深色半透明蒙板（canvas 路径） */
+  private fillMask(ctx: CanvasRenderingContext2D, p: Placement) {
     const W = this.active.width, H = this.active.height;
     const x0 = Math.max(0, p.tx);
     const y0 = Math.max(0, p.ty);
     const x1 = Math.min(W, p.tx + p.iw * p.scale);
     const y1 = Math.min(H, p.ty + p.ih * p.scale);
     if (x1 <= x0 || y1 <= y0) return; // 图片完全在视口外
-    ctx.fillStyle = "rgba(255,255,255,0.14)";
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(0, 0, W, y0);                       // 上
     ctx.fillRect(0, y1, W, H - y1);                  // 下
     ctx.fillRect(0, y0, x0, y1 - y0);                // 左

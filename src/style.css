@@ -119,8 +119,8 @@ html, body {
 }
 .load-error-hint { font-size: 12px; color: rgba(255, 255, 255, 0.45); }
 
-/* 动图/兜底 img 通道的蒙板：超大阴影铺满图片外区域 */
-#view-anim.masked { box-shadow: 0 0 0 300000px rgba(255, 255, 255, 0.14); }
+/* 动图/兜底 img 通道的蒙板：超大阴影铺满图片外区域（灯箱暗色） */
+#view-anim.masked { box-shadow: 0 0 0 300000px rgba(0, 0, 0, 0.6), 0 0 60px rgba(0, 0, 0, 0.8); }
 
 /* 缩放滑块 */
 #zoom-slider {

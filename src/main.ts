@@ -623,6 +623,16 @@ function toggleMask() {
   maskBtn.classList.toggle("active", viewer.maskOn);
 }
 
+/** 蒙板按钮 = 灯箱模式：未全屏时先进全屏（自动开蒙板），已全屏则切换蒙板 */
+async function maskLightbox() {
+  const w = getCurrentWindow();
+  if (!(await w.isFullscreen())) {
+    await applyFullscreen(true);
+    return;
+  }
+  toggleMask();
+}
+
 // ---------- 控制按钮 ----------
 
 function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
@@ -647,7 +657,7 @@ function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
 document.getElementById("btn-rot-ccw")!.addEventListener("click", () => void doRotate(false));
 document.getElementById("btn-rot-cw")!.addEventListener("click", () => void doRotate(true));
 document.getElementById("btn-slideshow")!.addEventListener("click", () => slideshow.toggle());
-document.getElementById("btn-mask")!.addEventListener("click", toggleMask);
+document.getElementById("btn-mask")!.addEventListener("click", () => void maskLightbox());
 document.getElementById("btn-frameless")!.addEventListener("click", () => void toggleFrameless());
 document.getElementById("btn-filmstrip")!.addEventListener("click", () => strip.toggle());
 document.getElementById("btn-fullscreen")!.addEventListener("click", () => void toggleFullscreen());
