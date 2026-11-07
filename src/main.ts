@@ -580,16 +580,9 @@ window.addEventListener("keydown", (e) => {
       void doDelete(e.shiftKey);
       break;
     case "Escape": {
+      // 幻灯片播放中先停止；其余任何状态 Esc = 关闭窗口
       if (slideshow.playing) { slideshow.stop(); break; }
-      // 沉浸模式（灯箱/只看图片）中按 Esc = 退出软件
-      void (async () => {
-        const w = getCurrentWindow();
-        if ((await w.isFullscreen()) || document.body.classList.contains("frameless")) {
-          await w.close();
-          return;
-        }
-        if (!viewer.isZoomed() && viewer.view) viewer.fit();
-      })();
+      void getCurrentWindow().close();
       break;
     }
   }

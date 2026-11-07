@@ -54,8 +54,15 @@ fn rotate_jpeg_lossless(p: &Path, clockwise: bool) -> Result<(), String> {
 }
 
 fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), String> {
+    // 按内容嗅探格式（扩展名可能不可信）；解除内存上限以支持超大图
     let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
-    let img = image::ImageReader::new(std::io::BufReader::new(f))
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(f));
+    let mut lim = image::Limits::default();
+    lim.max_alloc = None;
+    lim.max_image_width = None;
+    lim.max_image_height = None;
+    reader.limits(lim);
+    let img = reader
         .with_guessed_format()
         .map_err(|e| e.to_string())?
         .decode()

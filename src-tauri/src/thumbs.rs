@@ -64,7 +64,14 @@ pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, 
 fn generate(p: &Path) -> Result<Vec<u8>, String> {
     // 按内容嗅探格式：网上下载的图常见「.png 扩展名 + JPEG 内容」
     let f = std::fs::File::open(p).map_err(|e| format!("打开失败: {e}"))?;
-    let img = image::ImageReader::new(std::io::BufReader::new(f))
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(f));
+    // 解除默认 512MB 分配上限：超大壁纸海报解码后立即缩到 240px
+    let mut lim = image::Limits::default();
+    lim.max_alloc = None;
+    lim.max_image_width = None;
+    lim.max_image_height = None;
+    reader.limits(lim);
+    let img = reader
         .with_guessed_format()
         .map_err(|e| format!("格式识别失败: {e}"))?
         .decode()
