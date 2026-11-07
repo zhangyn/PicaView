@@ -1,0 +1,22 @@
+{
+  "name": "picaview",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "tauri": "tauri",
+    "gen:testdata": "node tools/gen-testdata.mjs",
+    "gen:icon": "node tools/gen-icon.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.6",
+    "jpeg-js": "^0.4.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.11"
+  }
+}

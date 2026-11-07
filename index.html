@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PicaView</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!-- 图层：静图用 canvas，动图用 img，两层叠加做交叉淡入 -->
+    <div id="stage">
+      <canvas id="view-a"></canvas>
+      <canvas id="view-b"></canvas>
+      <img id="view-anim" alt="" draggable="false" />
+      <div id="checker"></div>
+      <div id="loading" class="hidden"><div class="spinner"></div></div>
+      <div id="load-error" class="hidden">
+        <div id="load-error-msg"></div>
+        <div class="load-error-hint">换一张试试，或按 → 翻页</div>
+      </div>
+      <div id="toast" class="hidden"></div>
+      <div id="drop-hint" class="hidden"><span>松开以打开图片</span></div>
+    </div>
+
+    <!-- 空状态提示 -->
+    <div id="empty" class="hidden">
+      <div class="empty-icon">🖼</div>
+      <div class="empty-title">PicaView</div>
+      <div class="empty-hint">把图片拖到这里，或将图片文件用 PicaView 打开</div>
+    </div>
+
+    <!-- 信息浮层（左下） -->
+    <div id="infobar">
+      <div id="info-name"></div>
+      <div id="info-meta"></div>
+    </div>
+
+    <!-- 缩放百分比指示（右下，缩放时短暂显示） -->
+    <div id="zoom-indicator" class="hidden"></div>
+
+    <!-- 底部胶片条 -->
+    <div id="filmstrip" class="hidden">
+      <div id="thumbs"></div>
+    </div>
+
+    <!-- 主控制按钮（右下）+ 缩放滑块 -->
+    <div id="controls">
+      <input id="zoom-slider" type="range" min="0" max="100" step="0.5" title="缩放比例" />
+      <span id="zoom-pct">100%</span>
+      <button id="btn-rot-ccw" title="向左旋转 (L)"></button>
+      <button id="btn-rot-cw" title="向右旋转 (R)"></button>
+      <button id="btn-slideshow" title="幻灯片 (S)"></button>
+      <button id="btn-mask" title="蒙板：图片外灰色半透明 (M)"></button>
+      <button id="btn-frameless" title="只看图片：隐藏标题栏 (B)"></button>
+      <button id="btn-filmstrip" title="胶片条 (T)"></button>
+      <button id="btn-fullscreen" title="全屏 (Enter)"></button>
+    </div>
+
+    <!-- 左右翻页大按钮 -->
+    <div id="nav-prev" class="nav-arrow" title="上一张 (←)"></div>
+    <div id="nav-next" class="nav-arrow" title="下一张 (→)"></div>
+
+    <!-- 通用确认对话框 -->
+    <div id="dialog-backdrop" class="hidden">
+      <div id="dialog">
+        <div id="dialog-msg"></div>
+        <input id="dialog-input" class="hidden" spellcheck="false" />
+        <div id="dialog-btns">
+          <button id="dialog-cancel">取消</button>
+          <button id="dialog-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

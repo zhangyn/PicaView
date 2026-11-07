@@ -1,0 +1,14 @@
+{
+  "identifier": "default",
+  "description": "PicaView 主窗口能力",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-title",
+    "core:window:allow-set-decorations",
+    "core:window:allow-is-decorated",
+    "core:window:allow-start-dragging"
+  ]
+}

@@ -1,0 +1,368 @@
+/* PicaView — 暗色沉浸式看图 */
+
+:root {
+  --bg: #1a1a1a;
+  --accent: #4a9eff;
+  --ctrl-bg: rgba(28, 28, 28, 0.85);
+  --ctrl-border: rgba(255, 255, 255, 0.12);
+  --text-dim: rgba(255, 255, 255, 0.75);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: #eee;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---------- 舞台 ---------- */
+#stage { position: absolute; inset: 0; overflow: hidden; }
+
+#view-a, #view-b {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1; /* 必须在棋盘格之上 */
+  transition: opacity 0.18s ease-out;
+}
+#view-a.front { opacity: 1; }
+#view-a.back, #view-b.back { opacity: 0; }
+#view-b.front { opacity: 1; }
+
+#view-anim {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  transform-origin: 0 0;
+  will-change: transform;
+  z-index: 1; /* 必须在棋盘格之上 */
+}
+
+/* 透明区域棋盘格（PNG 透明底可见）——永远垫底 */
+#checker {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
+  background:
+    conic-gradient(#2a2a2a 25%, #222 0 50%, #2a2a2a 0 75%, #222 0) 0 0 / 24px 24px;
+}
+#checker.show { opacity: 1; }
+
+/* ---------- 加载 / 提示 ---------- */
+#loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 3;
+}
+#loading.hidden, .hidden { display: none !important; }
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#toast {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  z-index: 3;
+  background: var(--ctrl-bg);
+  border: 1px solid var(--ctrl-border);
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 14px;
+  backdrop-filter: blur(8px);
+  animation: toast-in 0.2s ease-out;
+}
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+
+/* 加载失败浮层 */
+#load-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  pointer-events: none;
+  z-index: 3;
+}
+#load-error-msg {
+  background: rgba(160, 40, 40, 0.85);
+  border: 1px solid rgba(255, 120, 120, 0.4);
+  border-radius: 8px;
+  padding: 12px 20px;
+  font-size: 14px;
+  max-width: 70vw;
+  word-break: break-all;
+}
+.load-error-hint { font-size: 12px; color: rgba(255, 255, 255, 0.45); }
+
+/* 动图/兜底 img 通道的蒙板：超大阴影铺满图片外区域 */
+#view-anim.masked { box-shadow: 0 0 0 300000px rgba(255, 255, 255, 0.14); }
+
+/* 缩放滑块 */
+#zoom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 130px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22);
+  outline: none;
+  cursor: pointer;
+  align-self: center;
+}
+#zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ddd;
+  border: 2px solid var(--accent);
+  cursor: grab;
+}
+#zoom-slider::-webkit-slider-thumb:active { cursor: grabbing; background: var(--accent); }
+#zoom-pct {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-width: 44px;
+  text-align: center;
+  align-self: center;
+}
+
+#drop-hint {
+  position: absolute;
+  inset: 12px;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(74, 158, 255, 0.08);
+  font-size: 18px;
+  color: var(--accent);
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* ---------- 空状态 ---------- */
+#empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  z-index: 2;
+}
+.empty-icon { font-size: 56px; opacity: 0.5; }
+.empty-title { font-size: 22px; font-weight: 600; color: var(--text-dim); }
+.empty-hint { font-size: 14px; color: rgba(255, 255, 255, 0.4); }
+
+/* ---------- 信息浮层 ---------- */
+#infobar {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  padding: 8px 14px;
+  background: var(--ctrl-bg);
+  border: 1px solid var(--ctrl-border);
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  transition: opacity 0.3s;
+  max-width: 46vw;
+  z-index: 2;
+}
+#infobar.hidden2 { opacity: 0; }
+#info-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#info-meta { font-size: 12px; color: rgba(255, 255, 255, 0.55); margin-top: 2px; }
+
+/* ---------- 缩放指示 ---------- */
+#zoom-indicator {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  padding: 6px 12px;
+  background: var(--ctrl-bg);
+  border: 1px solid var(--ctrl-border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  backdrop-filter: blur(8px);
+  transition: opacity 0.4s;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ---------- 胶片条 ---------- */
+#filmstrip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 108px;
+  background: linear-gradient(to top, rgba(12, 12, 12, 0.92), rgba(12, 12, 12, 0.75));
+  border-top: 1px solid var(--ctrl-border);
+  backdrop-filter: blur(10px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+  z-index: 2;
+}
+#filmstrip::-webkit-scrollbar { height: 8px; }
+#filmstrip::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 4px; }
+
+#thumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  width: max-content;
+}
+.thumb {
+  width: 128px;
+  height: 88px;
+  border-radius: 4px;
+  background: #111;
+  border: 2px solid transparent;
+  cursor: pointer;
+  flex: none;
+  opacity: 0.75;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.thumb:hover { opacity: 1; }
+.thumb.current { border-color: var(--accent); opacity: 1; }
+
+/* 有胶片条时信息栏上移 */
+body.has-strip #infobar { bottom: 124px; }
+
+/* ---------- 控制按钮 ---------- */
+#controls {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  gap: 6px;
+  transition: opacity 0.3s;
+  z-index: 2;
+}
+body.has-strip #controls { bottom: 124px; }
+
+#controls button {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  border: 1px solid var(--ctrl-border);
+  background: var(--ctrl-bg);
+  color: #ddd;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(8px);
+  transition: background 0.15s;
+}
+#controls button:hover { background: rgba(60, 60, 60, 0.9); }
+#controls button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#controls button.active { color: var(--accent); border-color: var(--accent); }
+
+/* 左右翻页箭头 */
+.nav-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--ctrl-bg);
+  border: 1px solid var(--ctrl-border);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.25s;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 22px;
+  pointer-events: none;
+  z-index: 2;
+}
+#nav-prev { left: 14px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ddd' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 5l-7 7 7 7'/%3E%3C/svg%3E"); }
+#nav-next { right: 14px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ddd' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 5l7 7-7 7'/%3E%3C/svg%3E"); }
+body.controls-on .nav-arrow { opacity: 0.85; pointer-events: auto; }
+.nav-arrow:hover { opacity: 1 !important; }
+
+/* 闲置时隐藏控件 */
+body.controls-off #controls, body.controls-off .nav-arrow { opacity: 0; pointer-events: none; }
+body.controls-off { cursor: none; }
+
+/* ---------- 对话框 ---------- */
+#dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+#dialog {
+  background: #262626;
+  border: 1px solid var(--ctrl-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  min-width: 340px;
+  max-width: 480px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+#dialog-msg { font-size: 14px; line-height: 1.5; margin-bottom: 16px; word-break: break-all; }
+#dialog-input {
+  width: 100%;
+  background: #1b1b1b;
+  border: 1px solid var(--ctrl-border);
+  border-radius: 6px;
+  color: #eee;
+  font-size: 14px;
+  padding: 8px 10px;
+  margin-bottom: 16px;
+  outline: none;
+}
+#dialog-input:focus { border-color: var(--accent); }
+#dialog-btns { display: flex; justify-content: flex-end; gap: 8px; }
+#dialog-btns button {
+  padding: 7px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--ctrl-border);
+  background: #333;
+  color: #ddd;
+  font-size: 13px;
+  cursor: pointer;
+}
+#dialog-btns button:hover { background: #3d3d3d; }
+#dialog-ok { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+#dialog-ok.danger { background: #e5484d !important; border-color: #e5484d !important; }

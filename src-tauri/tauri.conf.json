@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PicaView",
+  "version": "0.1.0",
+  "identifier": "com.picaview.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PicaView",
+        "width": 1150,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 480,
+        "center": true,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "fileAssociations": [
+      { "ext": ["jpg", "jpeg"], "name": "PicaView Image", "description": "JPEG 图像", "role": "Viewer" },
+      { "ext": ["png"], "name": "PicaView Image", "description": "PNG 图像", "role": "Viewer" },
+      { "ext": ["bmp"], "name": "PicaView Image", "description": "BMP 位图", "role": "Viewer" },
+      { "ext": ["gif"], "name": "PicaView Image", "description": "GIF 动图", "role": "Viewer" },
+      { "ext": ["webp"], "name": "PicaView Image", "description": "WebP 图像", "role": "Viewer" }
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "skip" },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "picaview"
+version = "0.1.0"
+description = "极简看图软件"
+edition = "2021"
+
+[features]
+# tauri build 会自动启用；裸 cargo build --release 缺此特性会以 dev 模式加载前端
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "gif", "webp"] }
+kamadak-exif = "0.6"
+turbojpeg = { version = "1", default-features = false, features = ["cmake"] }
+trash = "5"
+natord = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,23 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# 本地测试数据（可由 tools/gen-testdata.mjs 重新生成）
+testdata/
+watch/
+
+# 个人文件
+Snipaste_*.png
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# IDE / 系统
+.vscode/
+.idea/
+.zcode/
+.DS_Store
+Thumbs.db
