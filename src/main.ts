@@ -86,9 +86,8 @@ export async function openPath(p: string) {
     }
     index = entries.length ? 0 : -1;
     afterListChange();
-    suppressAutoLightbox = false;
+    await engageLightboxForOpen();
     void showCurrent(true);
-    void autoLightboxOnce();
     return;
   }
   const dir = p.slice(0, Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/")));
@@ -115,9 +114,20 @@ export async function openPath(p: string) {
     return;
   }
   afterListChange();
-  suppressAutoLightbox = false;
+  // 灯箱样式必须在图片首次绘制之前生效，否则会先看到铺满窗口的图
+  await engageLightboxForOpen();
   void showCurrent(true);
-  void autoLightboxOnce();
+}
+
+/** 打开图片前的灯箱介入：窗口已全屏则直接挂样式，否则进全屏 */
+async function engageLightboxForOpen() {
+  if (lightboxOn) return;
+  const w = getCurrentWindow();
+  if (await w.isFullscreen()) {
+    enterLightbox();
+    return;
+  }
+  await applyFullscreen(true);
 }
 
 async function statEntry(path: string): Promise<ImageEntry | null> {
@@ -591,7 +601,6 @@ const framelessBtn = document.getElementById("btn-frameless")!;
 const maskBtn = document.getElementById("btn-mask")!;
 let lightboxOn = false;
 /** 用户主动退出灯箱后，本次会话内浏览不再自动进入（打开新文件时重置） */
-let suppressAutoLightbox = false;
 
 function enterLightbox() {
   if (lightboxOn) return;
@@ -614,23 +623,13 @@ function enterLightbox() {
 function exitLightbox() {
   if (!lightboxOn) return;
   lightboxOn = false;
-  suppressAutoLightbox = true;
   document.documentElement.classList.remove("lightbox");
   viewer.fitRatio = null;
   viewer.fit();
   diag("LIGHTBOX OFF");
 }
 
-/** 打开图片后自动进入灯箱（用户主动退出后不再自动，新开文件时重置） */
-async function autoLightboxOnce() {
-  if (!entries.length || lightboxOn || suppressAutoLightbox) return;
-  const w = getCurrentWindow();
-  if (await w.isFullscreen()) {
-    enterLightbox(); // 窗口按配置已全屏，只挂灯箱样式
-    return;
-  }
-  await applyFullscreen(true);
-}
+// 打开图片前的灯箱介入统一走 engageLightboxForOpen()
 
 async function applyFullscreen(on: boolean) {
   const w = getCurrentWindow();

@@ -20,7 +20,8 @@
         "center": true,
         "theme": "Dark",
         "transparent": true,
-        "fullscreen": true
+        "fullscreen": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling"
       }
     ],
     "security": {
