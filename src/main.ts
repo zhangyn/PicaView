@@ -86,7 +86,9 @@ export async function openPath(p: string) {
     }
     index = entries.length ? 0 : -1;
     afterListChange();
+    suppressAutoLightbox = false;
     void showCurrent(true);
+    void autoLightboxOnce();
     return;
   }
   const dir = p.slice(0, Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/")));
@@ -113,7 +115,9 @@ export async function openPath(p: string) {
     return;
   }
   afterListChange();
+  suppressAutoLightbox = false;
   void showCurrent(true);
+  void autoLightboxOnce();
 }
 
 async function statEntry(path: string): Promise<ImageEntry | null> {
@@ -567,14 +571,11 @@ window.addEventListener("keydown", (e) => {
       break;
     case "Escape": {
       if (slideshow.playing) { slideshow.stop(); break; }
+      // 沉浸模式（灯箱/只看图片）中按 Esc = 退出软件
       void (async () => {
         const w = getCurrentWindow();
-        if (await w.isFullscreen()) {
-          await applyFullscreen(false);
-          return;
-        }
-        if (document.body.classList.contains("frameless")) {
-          void toggleFrameless();
+        if ((await w.isFullscreen()) || document.body.classList.contains("frameless")) {
+          await w.close();
           return;
         }
         if (!viewer.isZoomed() && viewer.view) viewer.fit();
@@ -589,6 +590,8 @@ window.addEventListener("keydown", (e) => {
 const framelessBtn = document.getElementById("btn-frameless")!;
 const maskBtn = document.getElementById("btn-mask")!;
 let lightboxOn = false;
+/** 用户主动退出灯箱后，本次会话内浏览不再自动进入（打开新文件时重置） */
+let suppressAutoLightbox = false;
 
 function enterLightbox() {
   if (lightboxOn) return;
@@ -599,6 +602,9 @@ function enterLightbox() {
     viewer.setMask(false);
     maskBtn.classList.remove("active");
   }
+  // Picasa 式适中展示：图片占视口约 78%，四周留出蒙板
+  viewer.fitRatio = 0.78;
+  viewer.fit();
   const hint = document.getElementById("lightbox-hint")!;
   hint.classList.remove("hidden");
   setTimeout(() => hint.classList.add("hidden"), 3500);
@@ -608,9 +614,17 @@ function enterLightbox() {
 function exitLightbox() {
   if (!lightboxOn) return;
   lightboxOn = false;
+  suppressAutoLightbox = true;
   document.documentElement.classList.remove("lightbox");
-  viewer.paint();
+  viewer.fitRatio = null;
+  viewer.fit();
   diag("LIGHTBOX OFF");
+}
+
+/** 打开图片后自动进入灯箱（用户主动退出后不再自动，新开文件时重置） */
+async function autoLightboxOnce() {
+  if (!entries.length || lightboxOn || suppressAutoLightbox) return;
+  await applyFullscreen(true);
 }
 
 async function applyFullscreen(on: boolean) {
@@ -649,7 +663,7 @@ async function toggleFrameless() {
   document.body.classList.toggle("frameless", framelessNow);
   framelessBtn.classList.toggle("active", framelessNow);
   if (framelessNow) {
-    toast("只看图片模式：右键拖动移动窗口，B 或 Esc 退出");
+    toast("只看图片模式：右键拖动移动窗口，Esc 退出软件");
   }
 }
 

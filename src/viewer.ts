@@ -34,6 +34,8 @@ export class Viewer {
   private alpha = false;
   /** 蒙板：图片外区域灰色半透明 */
   maskOn = false;
+  /** 灯箱模式下的适配比例：图片只占视口的一部分（Picasa 式适中展示） */
+  fitRatio: number | null = null;
   private rafWatchdog = 0;
 
   /** 每次实际绘制后回调（用于缩放指示） */
@@ -81,10 +83,10 @@ export class Viewer {
   private get cw() { return this.active.width; }
   private get ch() { return this.active.height; }
 
-  /** 适配窗口的缩放比（设备像素） */
+  /** 适配窗口的缩放比（含灯箱比例，设备像素） */
   get fitScale(): number {
     if (!this.view) return 1;
-    return Math.min(this.cw / this.view.iw, this.ch / this.view.ih);
+    return (Math.min(this.cw / this.view.iw, this.ch / this.view.ih)) * (this.fitRatio ?? 1);
   }
 
   isZoomed(): boolean {
@@ -184,7 +186,8 @@ export class Viewer {
   fit() {
     if (!this.view) return;
     const p = this.view;
-    const s = Math.min(this.cw / p.iw, this.ch / p.ih);
+    let s = Math.min(this.cw / p.iw, this.ch / p.ih);
+    if (this.fitRatio != null) s *= this.fitRatio;
     p.scale = s;
     p.tx = (this.cw - p.iw * s) / 2;
     p.ty = (this.ch - p.ih * s) / 2;
