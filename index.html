@@ -9,6 +9,8 @@
   <body>
     <!-- 图层：静图用 canvas，动图用 img，两层叠加做交叉淡入 -->
     <div id="stage">
+      <div id="lightbox-mask"></div>
+      <div id="lightbox-hint" class="hidden">欢迎使用 PicaView 照片查看器 · Esc 或点击图片外退出</div>
       <canvas id="view-a"></canvas>
       <canvas id="view-b"></canvas>
       <img id="view-anim" alt="" draggable="false" />

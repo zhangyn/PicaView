@@ -1,6 +1,6 @@
 # PicaView
 
-极简看图软件：快、顺滑、只看图。
+极简看图软件——参照 Google 的 Picasa 查看器：快、顺滑、只看图。
 无图库、无相册、无人脸、无编辑、无联网。
 
 ![tech](https://img.shields.io/badge/Tauri-2-blue) ![platform](https://img.shields.io/badge/Windows-10%2F11-lightgrey)
@@ -29,7 +29,7 @@
 | S | 幻灯片 | 拖拽 | 平移 |
 | T | 胶片条 | 鼠标侧键 | 前进 / 后退 |
 | I | 信息浮层 | L / R | 左旋 / 右旋 |
-| **B** | **只看图片（隐藏标题栏）** | **M** | **蒙板（图片外灰色半透明）** |
+| **B** | **只看图片（隐藏标题栏）** | **M** | **蒙板（灯箱：图片外压暗）** |
 | F2 | 重命名 | Delete | 移入回收站 |
 | Shift+Delete | 彻底删除 | Esc | 退出幻灯片/只看图片模式 |
 

@@ -423,6 +423,7 @@ stage.addEventListener("wheel", (e) => {
 
 let panning = false;
 let lastX = 0, lastY = 0;
+let downX = 0, downY = 0, dragMoved = false;
 
 stage.addEventListener("pointerdown", (e) => {
   // 无边框模式下：右键拖动 = 移动窗口
@@ -435,14 +436,16 @@ stage.addEventListener("pointerdown", (e) => {
   if (e.button === 4) { nav(1); e.preventDefault(); return; }
   if (e.button !== 0 || !viewer.view) return;
   panning = true;
-  lastX = e.clientX;
-  lastY = e.clientY;
+  dragMoved = false;
+  downX = lastX = e.clientX;
+  downY = lastY = e.clientY;
   stage.setPointerCapture(e.pointerId);
   stage.style.cursor = "grabbing";
 });
 
 stage.addEventListener("pointermove", (e) => {
   if (!panning) return;
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) dragMoved = true;
   viewer.panBy(e.clientX - lastX, e.clientY - lastY);
   lastX = e.clientX;
   lastY = e.clientY;
@@ -452,6 +455,15 @@ stage.addEventListener("pointerup", (e) => {
   panning = false;
   stage.style.cursor = "";
   if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
+});
+
+// 灯箱模式：点击图片外（非拖拽）退出，还原 Picasa 行为
+stage.addEventListener("click", (e) => {
+  if (!lightboxOn || dragMoved) return;
+  const rect = stage.getBoundingClientRect();
+  if (isOutsideImage(e.clientX - rect.left, e.clientY - rect.top)) {
+    void applyFullscreen(false);
+  }
 });
 
 stage.addEventListener("dblclick", (e) => {
@@ -572,33 +584,58 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-// ---------- 全屏（含蒙板联动：全屏自动开蒙板，退出恢复原状） ----------
+// ---------- 全屏（灯箱模式：窗口透明，压暗桌面，图片悬浮居中） ----------
 
 const framelessBtn = document.getElementById("btn-frameless")!;
 const maskBtn = document.getElementById("btn-mask")!;
-let maskAutoByFs = false;
+let lightboxOn = false;
+
+function enterLightbox() {
+  if (lightboxOn) return;
+  lightboxOn = true;
+  document.documentElement.classList.add("lightbox");
+  // 灯箱用页面级覆盖层压暗桌面，关闭 canvas 自带的暗色填充
+  if (viewer.maskOn) {
+    viewer.setMask(false);
+    maskBtn.classList.remove("active");
+  }
+  const hint = document.getElementById("lightbox-hint")!;
+  hint.classList.remove("hidden");
+  setTimeout(() => hint.classList.add("hidden"), 3500);
+  diag("LIGHTBOX ON");
+}
+
+function exitLightbox() {
+  if (!lightboxOn) return;
+  lightboxOn = false;
+  document.documentElement.classList.remove("lightbox");
+  viewer.paint();
+  diag("LIGHTBOX OFF");
+}
 
 async function applyFullscreen(on: boolean) {
   const w = getCurrentWindow();
   await w.setFullscreen(on);
-  diag(`FS ${on ? "ON" : "OFF"} mask=${viewer.maskOn}`);
-  if (on) {
-    if (!viewer.maskOn) {
-      viewer.setMask(true);
-      maskBtn.classList.add("active");
-      maskAutoByFs = true;
-    }
-  } else if (maskAutoByFs) {
-    viewer.setMask(false);
-    maskBtn.classList.remove("active");
-    maskAutoByFs = false;
-  }
+  diag(`FS ${on ? "ON" : "OFF"}`);
+  if (on) enterLightbox();
+  else exitLightbox();
 }
 
 async function toggleFullscreen() {
   const w = getCurrentWindow();
   const fs = await w.isFullscreen();
   await applyFullscreen(!fs);
+}
+
+/** 点击图片外（非拖拽）→ 退出灯箱，还原 Picasa 行为 */
+function isOutsideImage(cx: number, cy: number): boolean {
+  const p = viewer.view;
+  if (!p) return false;
+  const x = p.tx / viewer.dpr;
+  const y = p.ty / viewer.dpr;
+  const w = (p.iw * p.scale) / viewer.dpr;
+  const h = (p.ih * p.scale) / viewer.dpr;
+  return cx < x || cy < y || cx > x + w || cy > y + h;
 }
 
 // ---------- 只看图片模式（无边框） ----------
@@ -623,14 +660,14 @@ function toggleMask() {
   maskBtn.classList.toggle("active", viewer.maskOn);
 }
 
-/** 蒙板按钮 = 灯箱模式：未全屏时先进全屏（自动开蒙板），已全屏则切换蒙板 */
+/** 蒙板按钮 = 灯箱模式开关：进入全屏灯箱 / 退出还原 */
 async function maskLightbox() {
   const w = getCurrentWindow();
-  if (!(await w.isFullscreen())) {
-    await applyFullscreen(true);
+  if (await w.isFullscreen()) {
+    await applyFullscreen(false);
     return;
   }
-  toggleMask();
+  await applyFullscreen(true);
 }
 
 // ---------- 控制按钮 ----------

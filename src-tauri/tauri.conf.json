@@ -18,7 +18,8 @@
         "minWidth": 640,
         "minHeight": 480,
         "center": true,
-        "theme": "Dark"
+        "theme": "Dark",
+        "transparent": true
       }
     ],
     "security": {
