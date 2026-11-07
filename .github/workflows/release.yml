@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'PicaView ${{ github.ref_name }}'
+          releaseBody: >-
+            极简看图软件：参照 Google 的 Picasa 查看器，快、顺滑、只看图。
+
+
+            **功能**
+
+            - 打开即灯箱：透明全屏覆盖桌面，桌面压暗，图片 78% 适中悬浮居中
+
+            - 秒开（EXIF 预览 + 邻图预加载 + 缩略图磁盘缓存）
+
+            - 光标缩放 / 缩放滑块 / 双击切换，胶片条，幻灯片，只看图片模式
+
+            - JPEG 无损旋转、重命名、回收站删除
+
+            - 文件关联、单实例、拖拽打开
+
+
+            **安装**：下载下方 `PicaView_*_x64-setup.exe` 运行即可（需 WebView2，Win10/11 一般自带）。
+
+            **支持格式**：JPEG · PNG · BMP · GIF · WebP · APNG
+          releaseDraft: false
+          prerelease: false
