@@ -24,7 +24,6 @@ fn on_any_monitor(
 fn ensure_on_screen(app: &tauri::AppHandle) {
     let Some(w) = app.get_webview_window("main") else { return };
     let _ = w.unminimize();
-    let _ = w.show();
     let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(1150, 760));
     let pos = w.outer_position().unwrap_or(tauri::PhysicalPosition::new(0, 0));
     let monitors = app.available_monitors().unwrap_or_default();

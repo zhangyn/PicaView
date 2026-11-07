@@ -775,6 +775,18 @@ attachIdleHider();
 strip.setVisible(true); // 默认显示胶片条
 document.body.classList.add("has-strip");
 
+/** 首帧就绪后显示窗口：白屏/隐形过渡全部发生在看不见的阶段 */
+function showWindowWhenReady() {
+  let shown = false;
+  const show = () => {
+    if (shown) return;
+    shown = true;
+    void getCurrentWindow().show();
+  };
+  requestAnimationFrame(() => requestAnimationFrame(show));
+  setTimeout(show, 1200); // 兜底：隐藏窗口下 rAF 可能不跑
+}
+
 (async () => {
   // 启动参数（文件关联 / 手动传入）
   try {
@@ -783,9 +795,11 @@ document.body.classList.add("has-strip");
     if (target) {
       // 窗口本身已按配置全屏，这里直接挂灯箱样式，首帧即蒙板+胶片条
       enterLightbox();
+      showWindowWhenReady();
       await openPath(target);
       return;
     }
   } catch { /* ignore */ }
   emptyEl.classList.remove("hidden");
+  showWindowWhenReady();
 })();
