@@ -17,7 +17,8 @@ import { isPicking, pickImage } from "./picker";
 import { TaskQueue } from "./queue";
 import {
   BLOB_URL_POOL_MAX, FULL_LOAD_DEBOUNCE_MS, KEEPALIVE_MS, KEY_PAN_RATIO, KEY_ZOOM_STEP,
-  LIGHTBOX_FIT_RATIO, LIGHTBOX_HINT_MS, LOADING_DELAY_MS, PRELOAD_CONCURRENCY, PRELOAD_DELAY_MS,
+  LIGHTBOX_FIT_RATIO, LIGHTBOX_HINT_MS, LOADING_DELAY_MS, LOD_MIN_LONG_SIDE, LOD_UPGRADE_AT,
+  LOD_VIEW_SCALE, PRELOAD_CONCURRENCY, PRELOAD_DELAY_MS,
   SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX, TIER_MIN_PX,
   TIER_MIN_VIEWPORT_PX, TIER_SCALE, WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
 } from "./config";
@@ -81,6 +82,70 @@ function storeTier(path: string, tier: ImageBitmap) {
     tiers.delete(oldest);
   }
   tiers.set(path, tier);
+}
+
+// ---------- LOD：超大图先按视口降采样解码 ----------
+
+/** 当前显示的是降采样位图（原图尚未加载）；null 表示已经是原图 */
+let lodPath: string | null = null;
+/** 原图补载进行中 */
+let lodBusy = false;
+
+/**
+ * LOD 决策：源图像长边超过"视口设备长边 × LOD_VIEW_SCALE"时降采样解码，
+ * 否则返回空（按原样解码，与以前完全一致）。
+ * 同时返回源图的显示尺寸（infoBar 要显示真实尺寸，而不是降采样后的）。
+ */
+function lodPlan(
+  buf: ArrayBuffer,
+  orientation: number,
+): { opts?: ImageBitmapOptions; dims?: { w: number; h: number } } {
+  const dim = peekImageSize(new Uint8Array(buf));
+  if (!dim) return {}; // 文件头无法识别：交给浏览器原样解码
+  // EXIF 5..8 会把显示宽高互换
+  const dims = orientation >= 5 ? { w: dim.h, h: dim.w } : { w: dim.w, h: dim.h };
+  const viewLong = Math.max(stage.clientWidth, stage.clientHeight) * viewer.dpr;
+  const limit = Math.max(LOD_MIN_LONG_SIDE, Math.round(viewLong * LOD_VIEW_SCALE));
+  const longest = Math.max(dims.w, dims.h);
+  if (longest <= limit) return { dims };
+  const k = limit / longest;
+  return {
+    dims,
+    opts: {
+      resizeWidth: Math.max(1, Math.round(dims.w * k)),
+      resizeHeight: Math.max(1, Math.round(dims.h * k)),
+      resizeQuality: "high",
+    },
+  };
+}
+
+/** 放大到"1 位图像素 ≥ 1 设备像素"时，后台补一次原图（保持当前缩放与位置） */
+function maybeUpgradeLod() {
+  const p = viewer.view;
+  // 设备像素/源像素 达到阈值（约等于放大到 100%）才需要原图
+  if (!lodPath || lodBusy || !p || p.scale * viewer.lodRatio < LOD_UPGRADE_AT) return;
+  const entry = entries[index];
+  if (!entry || pathKey(entry.path) !== pathKey(lodPath)) return;
+  const path = entry.path;
+  const token = loadToken;
+  lodBusy = true;
+  void (async () => {
+    try {
+      const bmp = await createImageBitmap(new Blob([await readImageBuf(path)]));
+      if (token !== loadToken) {
+        bmp.close();
+        return;
+      }
+      lodPath = null;
+      viewer.setBitmap(bmp, { alpha: !isOpaqueExt(path), keepView: true });
+      info.updateMeta({ w: bmp.width, h: bmp.height }, null);
+      diag(`LOD FULL ${entry.name} ${bmp.width}x${bmp.height}`);
+    } catch (e) {
+      diag(`LOAD FAIL LOD ${entry.name}: ${String(e)}`); // 保持降采样图
+    } finally {
+      lodBusy = false;
+    }
+  })();
 }
 
 // ---------- 图片加载（Rust read_image，规避 asset 协议路径限制） ----------
@@ -338,7 +403,7 @@ async function showCurrent(transition: boolean) {
   strip.ensureAround(entries, index);
   info.show(entry, index, entries.length);
   setTitle(`${entry.name} — PicaView`);
-  await loadFull(token, entry, { transition, preview: true });
+  await loadFull(token, entry, { transition, preview: true, keepView: false });
 }
 
 interface FullOpts {
@@ -346,12 +411,16 @@ interface FullOpts {
   transition: boolean;
   /** 先用 JPEG 内嵌 EXIF 预览快速出图 */
   preview: boolean;
+  /** 保留当前缩放/平移（tier → 全图的静默替换） */
+  keepView: boolean;
 }
 
 /** 读取并显示完整图。每个 await 之后都核对 token，过期则释放资源并放弃 */
 async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
   setLoading(true);
   let fullDone = false;
+  let exifInfo: ExifInfo | null = null;
+  lodPath = null; // 新的一次加载接管，上一张的 LOD 状态作废
 
   // 快速路径：EXIF 内嵌预览（仅 JPEG）
   if (o.preview && isJpeg(entry.path) && !entry.animated) {
@@ -372,11 +441,19 @@ async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
     if (entry.animated) {
       fullDone = await showViaImg(token, entry);
     } else {
-      const blob = await loadBlob(entry.path);
+      // EXIF 与本图字节并行读取：方向决定"显示尺寸"，LOD 降采样要用到，
+      // 顺便省掉加载完成后的一次重复请求
+      const exifP = isJpeg(entry.path)
+        ? invoke<ExifInfo | null>("read_exif", { path: entry.path }).catch(() => null)
+        : Promise.resolve(null);
+      const buf = await readImageBuf(entry.path);
       if (token !== loadToken) return;
+      exifInfo = await exifP;
+      if (token !== loadToken) return;
+      const plan = lodPlan(buf, exifInfo?.orientation ?? 1);
       let bmp: ImageBitmap | null = null;
       try {
-        bmp = await createImageBitmap(blob);
+        bmp = await createImageBitmap(new Blob([buf]), plan.opts);
       } catch {
         // 位图解码失败（超大尺寸等）→ 下面走 img 通道兜底，浏览器可解码任意尺寸
       }
@@ -386,9 +463,16 @@ async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
       }
       if (bmp) {
         fullDone = true;
-        viewer.setBitmap(bmp, { alpha: !isOpaqueExt(entry.path), transition: o.transition });
-        info.updateMeta({ w: bmp.width, h: bmp.height }, null);
-        diag(`DECODE OK ${entry.name} ${bmp.width}x${bmp.height}`);
+        viewer.setBitmap(bmp, {
+          alpha: !isOpaqueExt(entry.path),
+          transition: o.transition,
+          keepView: o.keepView,
+          srcWidth: plan.dims?.w,
+        });
+        // 尺寸用源图的真实显示尺寸，而不是降采样后的位图尺寸
+        info.updateMeta(plan.dims ?? { w: bmp.width, h: bmp.height }, null);
+        lodPath = plan.opts ? entry.path : null;
+        diag(`DECODE OK ${entry.name} ${bmp.width}x${bmp.height}${plan.opts ? " (lod)" : ""}`);
       } else {
         fullDone = await showViaImg(token, entry);
       }
@@ -401,21 +485,15 @@ async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
   }
   if (token !== loadToken) return;
 
-  // EXIF 拍摄信息
-  if (isJpeg(entry.path)) {
-    invoke<ExifInfo | null>("read_exif", { path: entry.path })
-      .then((ex) => {
-        if (token === loadToken && ex) info.updateMeta(null, ex);
-      })
-      .catch(() => {});
-  }
+  // EXIF 拍摄信息（上面已并行取到，不再重复请求）
+  if (exifInfo) info.updateMeta(null, exifInfo);
 
   schedulePreload(token);
 }
 
 /** tier 已显示后补全图（静默替换，不做交叉淡入，也不再取 EXIF 预览） */
 function showCurrentFullQuiet(token: number, entry: ImageEntry) {
-  return loadFull(token, entry, { transition: false, preview: false });
+  return loadFull(token, entry, { transition: false, preview: false, keepView: true });
 }
 
 /** img 通道显示（动图 / 位图解码失败的兜底）。返回是否已显示；过期则释放 URL 且不覆盖当前画面 */
@@ -561,7 +639,7 @@ function jumpTo(i: number) {
     const run = () => {
       if (token !== loadToken) return;
       if (shown) void showCurrentFullQuiet(token, entry);
-      else void loadFull(token, entry, { transition: true, preview: true });
+      else void loadFull(token, entry, { transition: true, preview: true, keepView: false });
     };
     if (rapid) fullTimer = window.setTimeout(run, FULL_LOAD_DEBOUNCE_MS);
     else run();
@@ -651,6 +729,7 @@ zoomSlider.addEventListener("input", () => {
 let zoomTimer = 0;
 viewer.onPaint = (pct) => {
   if (!viewer.view) return;
+  maybeUpgradeLod(); // 放大到需要原图时后台补载
   const fit = Math.abs(pct - viewer.fitPct()) < 0.5;
   const label = `${pct >= 100 ? Math.round(pct) : pct.toFixed(1)}%${fit ? " (适应)" : ""}`;
   zoomPctLabel.textContent = label;

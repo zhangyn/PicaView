@@ -1,10 +1,12 @@
 // 目录扫描与动图探测
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
 use tauri::Manager;
@@ -70,12 +72,15 @@ where
         .map_err(|e| format!("后台任务异常: {e}"))?
 }
 
+/// 解码尺寸上限（宽/高），缩略图与旋转共用
+pub const MAX_DIMENSION: u32 = 30000;
+
 /// 解码限制：有限的大值（1 GiB / 30000 px），既支持超大图又不至于无上限
 pub fn decode_limits() -> image::Limits {
     let mut lim = image::Limits::default();
     lim.max_alloc = Some(1 << 30);
-    lim.max_image_width = Some(30000);
-    lim.max_image_height = Some(30000);
+    lim.max_image_width = Some(MAX_DIMENSION);
+    lim.max_image_height = Some(MAX_DIMENSION);
     lim
 }
 
@@ -301,6 +306,48 @@ fn is_animated_gif<R: Read + Seek>(r: &mut BufReader<R>) -> bool {
     }
 }
 
+// ---------- 动图探测缓存 ----------
+
+/// 缓存条目上限，超出后整体清空（目录切换频繁时不至于无限增长）
+const ANIM_CACHE_MAX: usize = 8192;
+
+/// (mtime 纳秒, 文件大小, 是否动图)
+type AnimCacheEntry = (u128, u64, bool);
+
+/// 长路径（小写） → 缓存条目
+static ANIM_CACHE: LazyLock<Mutex<HashMap<String, AnimCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 带缓存的动图探测：扫描大目录时每个 gif/webp/png 都要读文件头，
+/// 同一会话内重复打开同一目录（以及 stat_file 与 list_images 之间）不必再读
+fn detect_animated_cached(p: &Path, ext: &str, md: &fs::Metadata) -> bool {
+    if !matches!(ext, "gif" | "webp" | "png") {
+        return false;
+    }
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = p.to_string_lossy().to_lowercase();
+    if let Ok(cache) = ANIM_CACHE.lock() {
+        if let Some((m, s, a)) = cache.get(&key) {
+            if *m == mtime && *s == md.len() {
+                return *a;
+            }
+        }
+    }
+    let animated = detect_animated(p, ext);
+    if let Ok(mut cache) = ANIM_CACHE.lock() {
+        if cache.len() >= ANIM_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, (mtime, md.len(), animated));
+    }
+    animated
+}
+
 fn entry_from(path: &Path, md: &fs::Metadata) -> ImageEntry {
     let ext = ext_of(path).unwrap_or_default();
     let modified = md
@@ -318,7 +365,7 @@ fn entry_from(path: &Path, md: &fs::Metadata) -> ImageEntry {
         path: path.to_string_lossy().into_owned(),
         size: md.len(),
         modified,
-        animated: detect_animated(&open_path, &ext),
+        animated: detect_animated_cached(&open_path, &ext, md),
     }
 }
 
@@ -327,11 +374,36 @@ fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
     natord::compare_ignore_case(a, b)
 }
 
+/// 并行扫描的线程上限（动图探测是 IO 密集，再多也收益有限）
+const MAX_SCAN_THREADS: usize = 8;
+/// 少于该数量时串行更快（线程创建/同步开销大于收益）
+const PARALLEL_MIN_ITEMS: usize = 64;
+
+/// 动图探测要逐个读文件头，按 CPU 数分块并行；顺序由 chunks 顺序保证
+fn entry_from_all(items: Vec<(PathBuf, fs::Metadata)>) -> Vec<ImageEntry> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(MAX_SCAN_THREADS);
+    if items.len() < PARALLEL_MIN_ITEMS || threads < 2 {
+        return items.iter().map(|(p, md)| entry_from(p, md)).collect();
+    }
+    let chunk = items.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = items
+            .chunks(chunk)
+            .map(|c| s.spawn(move || c.iter().map(|(p, md)| entry_from(p, md)).collect::<Vec<_>>()))
+            .collect();
+        // 单块 panic（损坏图片）只丢该块，不影响整次扫描
+        parts.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
+    })
+}
+
 /// 同步扫描目录，返回已排序的图片列表
 fn scan_dir(dir: &str) -> std::io::Result<Vec<ImageEntry>> {
     let rd = fs::read_dir(long_path(dir))?;
     let base = Path::new(dir);
-    let mut out: Vec<ImageEntry> = Vec::new();
+    let mut items: Vec<(PathBuf, fs::Metadata)> = Vec::new();
     for entry in rd.flatten() {
         let name = entry.file_name();
         // 先按扩展名过滤，非图片不产生任何额外系统调用
@@ -351,8 +423,9 @@ fn scan_dir(dir: &str) -> std::io::Result<Vec<ImageEntry>> {
         }
         let Ok(md) = entry.metadata() else { continue };
         // 路径由调用方传入的 dir 拼接，避免暴露 \\?\ 前缀
-        out.push(entry_from(&base.join(&name), &md));
+        items.push((base.join(&name), md));
     }
+    let mut out = entry_from_all(items);
     out.sort_by(|a, b| compare_names(&a.name, &b.name));
     Ok(out)
 }
@@ -527,6 +600,63 @@ mod tests {
         assert!(is_error_msg("WIN OFFSCREEN 已拉回"));
         assert!(!is_error_msg("THUMB OK x"));
         assert!(!is_error_msg("OPEN C:\\a.jpg"));
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pv-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn scan_dir_parallel_path_keeps_order_and_flags() {
+        // 超过并行阈值（64）：顺序仍需按自然排序，动图标记仍正确
+        let dir = temp_dir("scan");
+        let img = image::RgbaImage::new(1, 1);
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        for i in 0..70 {
+            fs::write(dir.join(format!("img_{i}.png")), &png).unwrap();
+        }
+        fs::write(dir.join("anim.gif"), gif_bytes(2, true)).unwrap();
+        fs::write(dir.join("still.gif"), gif_bytes(1, true)).unwrap();
+        fs::write(dir.join("notes.txt"), b"x").unwrap(); // 非图片不入列
+
+        let out = scan_dir(&dir.to_string_lossy()).unwrap();
+        assert_eq!(out.len(), 72);
+        let pos = |n: &str| out.iter().position(|e| e.name == n).unwrap();
+        assert_eq!(out[0].name, "anim.gif");
+        assert!(out[pos("anim.gif")].animated);
+        assert!(!out[pos("still.gif")].animated);
+        assert!(!out[pos("img_9.png")].animated);
+        assert!(pos("img_9.png") < pos("img_10.png"), "自然排序被并行打乱");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn anim_cache_follows_file_change() {
+        let dir = temp_dir("animcache");
+        let f = dir.join("a.gif");
+        fs::write(&f, gif_bytes(1, true)).unwrap();
+        let md = fs::metadata(&f).unwrap();
+        assert!(!detect_animated_cached(&f, "gif", &md));
+
+        // 改成两帧并把 mtime 推后 → 缓存必须失效（缓存键含 mtime + 大小）
+        fs::write(&f, gif_bytes(2, true)).unwrap();
+        let fh = fs::File::options().write(true).open(&f).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        fh.set_modified(later).unwrap();
+        drop(fh);
+        let md = fs::metadata(&f).unwrap();
+        assert!(detect_animated_cached(&f, "gif", &md));
+
+        // 重复查询命中缓存，结果稳定
+        assert!(detect_animated_cached(&f, "gif", &fs::metadata(&f).unwrap()));
+        // 不能动的格式直接 false，不进缓存也不读文件
+        assert!(!detect_animated_cached(&f, "jpg", &md));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

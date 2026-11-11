@@ -9,7 +9,8 @@ import {
 
 interface ThumbNode {
   path: string;
-  el: HTMLCanvasElement;
+  /** 占位元素（div.thumb）；真正绘制时才往里挂一个 canvas */
+  el: HTMLElement;
   /** 在列表中的下标（删除后保持连续） */
   idx: number;
   /** canvas 上已画有缩略图（像素占内存，离开范围会释放） */
@@ -57,7 +58,9 @@ export class Filmstrip {
 
     // 点击用事件委托：删除节点后不必重绑下标
     this.strip.addEventListener("click", (e) => {
-      const n = this.byEl.get(e.target as Element);
+      // 命中内层 canvas 时向上找占位 div
+      const el = (e.target as Element | null)?.closest?.(".thumb");
+      const n = el ? this.byEl.get(el) : undefined;
       if (n) this.onPick?.(n.idx);
     });
 
@@ -99,15 +102,16 @@ export class Filmstrip {
 
     const frag = document.createDocumentFragment();
     entries.forEach((e, i) => {
-      const cv = document.createElement("canvas");
-      cv.className = "thumb";
-      // 像素尺寸在真正画入缩略图时才分配（见 draw），未加载的占位不占显存
-      cv.title = e.name;
-      frag.appendChild(cv);
-      const n: ThumbNode = { path: e.path, el: cv, idx: i, loaded: false, removed: false };
+      // 只建一个轻量占位 div：上万个条目时不再各建一个 canvas（像素与显存都省），
+      // canvas 在真正绘制时由 draw() 挂上、release() 摘掉
+      const el = document.createElement("div");
+      el.className = "thumb";
+      el.title = e.name;
+      frag.appendChild(el);
+      const n: ThumbNode = { path: e.path, el, idx: i, loaded: false, removed: false };
       this.nodes.push(n);
       this.byPath.set(e.path, n);
-      this.byEl.set(cv, n);
+      this.byEl.set(el, n);
     });
     this.strip.appendChild(frag);
     for (const n of this.nodes) this.io.observe(n.el);
@@ -123,7 +127,7 @@ export class Filmstrip {
     n.removed = true;
     if (n.loaded) this.loadedCount--;
     n.loaded = false;
-    n.el.width = 0; // 释放像素
+    n.el.textContent = ""; // 摘掉 canvas，释放后备存储
     n.el.remove();
     this.nodes.splice(n.idx, 1);
     for (let i = n.idx; i < this.nodes.length; i++) this.nodes[i].idx = i;
@@ -145,7 +149,7 @@ export class Filmstrip {
       n.loaded = false;
       this.loadedCount--;
     }
-    n.el.width = 0; // 释放旧像素
+    n.el.textContent = ""; // 摘掉旧像素
     this.enqueue(n);
   }
 
@@ -220,7 +224,11 @@ export class Filmstrip {
   }
 
   private draw(n: ThumbNode, bmp: ImageBitmap) {
-    const cv = n.el;
+    let cv = n.el.firstElementChild as HTMLCanvasElement | null;
+    if (!cv) {
+      cv = document.createElement("canvas");
+      n.el.appendChild(cv);
+    }
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     cv.width = Math.round(THUMB_W * dpr);
     cv.height = Math.round(THUMB_H * dpr);
@@ -246,7 +254,7 @@ export class Filmstrip {
   }
 
   private release(n: ThumbNode) {
-    n.el.width = 0; // 清空并释放画布后备存储
+    n.el.textContent = ""; // 摘掉画布即释放后备存储
     n.loaded = false;
     this.loadedCount--;
   }

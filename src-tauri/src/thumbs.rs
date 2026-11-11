@@ -126,17 +126,12 @@ pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, 
 }
 
 fn generate(p: &Path) -> Result<Vec<u8>, String> {
-    // 按内容嗅探格式：网上下载的图常见「.png 扩展名 + JPEG 内容」
-    let f = std::fs::File::open(p).map_err(|e| format!("打开失败: {e}"))?;
-    let mut reader = image::ImageReader::new(std::io::BufReader::new(f));
-    // 超大壁纸海报解码后立即缩到 240px；限制为有限的大值，防止恶意/损坏文件耗尽内存
-    reader.limits(crate::imgscan::decode_limits());
-    let img = reader
-        .with_guessed_format()
-        .map_err(|e| format!("格式识别失败: {e}"))?
-        .decode()
-        .map_err(|e| format!("解码失败: {e}"))?;
-    let img = crate::exifinfo::oriented_dynamic(img, &p.to_string_lossy());
+    // JPEG 先走 turbojpeg 的 DCT 域缩放解码：只解到接近目标尺寸，
+    // 峰值内存与耗时都远低于"整图解码再缩"；失败（非 JPEG/损坏）则退回通用解码
+    let img = match jpeg_scaled(p, THUMB_MAX as usize) {
+        Ok(img) => img,
+        Err(_) => decode_full(p)?,
+    };
     let small = if img.width().max(img.height()) > THUMB_MAX {
         img.thumbnail(THUMB_MAX, THUMB_MAX) // box 滤镜，缩略图足够
     } else {
@@ -146,6 +141,81 @@ fn generate(p: &Path) -> Result<Vec<u8>, String> {
     let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
     small.write_with_encoder(enc).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// 通用解码（按内容嗅探格式）：网上下载的图常见「.png 扩展名 + JPEG 内容」
+fn decode_full(p: &Path) -> Result<image::DynamicImage, String> {
+    let f = std::fs::File::open(p).map_err(|e| format!("打开失败: {e}"))?;
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(f));
+    // 超大壁纸海报解码后立即缩到 240px；限制为有限的大值，防止恶意/损坏文件耗尽内存
+    reader.limits(crate::imgscan::decode_limits());
+    let img = reader
+        .with_guessed_format()
+        .map_err(|e| format!("格式识别失败: {e}"))?
+        .decode()
+        .map_err(|e| format!("解码失败: {e}"))?;
+    Ok(crate::exifinfo::oriented_dynamic(img, &p.to_string_lossy()))
+}
+
+/// turbojpeg 缩放解码（仅 JPEG）：按需选最小缩放档，并按 EXIF 方向摆正
+fn jpeg_scaled(p: &Path, target: usize) -> Result<image::DynamicImage, String> {
+    let data = std::fs::read(p).map_err(|e| e.to_string())?;
+    if !data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Err("不是 JPEG".into());
+    }
+    let mut dec = turbojpeg::Decompressor::new().map_err(|e| e.to_string())?;
+    let header = dec.read_header(&data).map_err(|e| e.to_string())?;
+    let max_dim = crate::imgscan::MAX_DIMENSION as usize;
+    if header.width > max_dim || header.height > max_dim {
+        return Err("图像尺寸超出上限".into());
+    }
+    let factor = pick_scale(header.width, header.height, target);
+    let size = header.scaled(factor);
+    // 与 decode_limits 的 max_alloc 对齐：极端情况下（无合适缩放档）也别一次吃掉上 GB
+    if size.width.saturating_mul(size.height).saturating_mul(3) > (1 << 30) {
+        return Err("解码结果过大".into());
+    }
+    dec.set_scaling_factor(factor).map_err(|e| e.to_string())?;
+    let pitch = size.width * 3;
+    let mut pixels = vec![0u8; pitch * size.height];
+    dec.decompress(
+        &data,
+        turbojpeg::Image {
+            pixels: pixels.as_mut_slice(),
+            width: size.width,
+            height: size.height,
+            pitch,
+            format: turbojpeg::PixelFormat::RGB,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let rgb = image::RgbImage::from_raw(size.width as u32, size.height as u32, pixels)
+        .ok_or_else(|| "解码结果尺寸异常".to_string())?;
+    let orientation = crate::exifinfo::orientation_of_bytes(&data);
+    Ok(crate::exifinfo::apply_orientation(
+        image::DynamicImage::ImageRgb8(rgb),
+        orientation,
+    ))
+}
+
+/// 选最小缩放档位，但解码后长边仍不小于 target（不放大、不过度解码）
+fn pick_scale(w: usize, h: usize, target: usize) -> turbojpeg::ScalingFactor {
+    let ratio = |f: turbojpeg::ScalingFactor| f.num() as f64 / f.denom() as f64;
+    let longest = w.max(h);
+    if longest <= target {
+        return turbojpeg::ScalingFactor::ONE;
+    }
+    let mut best = turbojpeg::ScalingFactor::ONE;
+    for f in turbojpeg::Decompressor::supported_scaling_factors() {
+        let r = ratio(f);
+        if r >= 1.0 || r >= ratio(best) {
+            continue;
+        }
+        if (longest as f64 * r).round() as usize >= target {
+            best = f;
+        }
+    }
+    best
 }
 
 // ---------- 缓存清理 ----------
@@ -239,6 +309,39 @@ mod tests {
     }
 
     const DAY: Duration = Duration::from_secs(24 * 3600);
+
+    #[test]
+    fn pick_scale_never_overdecodes_or_undershoots() {
+        // 小图不缩放
+        assert_eq!(pick_scale(240, 120, 240), turbojpeg::ScalingFactor::ONE);
+        assert_eq!(pick_scale(240, 240, 240), turbojpeg::ScalingFactor::ONE);
+        for (w, h) in [(4000, 3000), (300, 3000), (12000, 9000), (241, 1000)] {
+            let f = pick_scale(w, h, 240);
+            let r = f.num() as f64 / f.denom() as f64;
+            let scaled = (w.max(h) as f64 * r).round() as usize;
+            assert!(r <= 1.0, "{w}x{h}");
+            assert!(scaled >= 240, "{w}x{h} → {scaled}");
+            assert!(scaled <= 240 * 8, "{w}x{h} → {scaled}（过度解码）");
+        }
+    }
+
+    #[test]
+    fn generate_produces_240px_for_jpeg_and_png() {
+        let dir = std::env::temp_dir().join(format!("pv-thumb-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbImage::from_fn(1200, 800, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        for name in ["big.jpg", "big.png"] {
+            let p = dir.join(name);
+            img.save(&p).unwrap();
+            let bytes = generate(&p).unwrap();
+            let dec = image::load_from_memory(&bytes).unwrap();
+            assert_eq!(dec.width().max(dec.height()), THUMB_MAX, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn eviction_by_age() {

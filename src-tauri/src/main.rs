@@ -69,7 +69,7 @@ fn main() {
     tauri::Builder::default()
         // 单实例插件必须最先注册
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(target) = argv.iter().nth(1).filter(|a| !a.starts_with('-')) {
+            if let Some(target) = argv.get(1).filter(|a| !a.starts_with('-')) {
                 let _ = app.emit("open-file", target.to_string());
             }
             ensure_on_screen(app);

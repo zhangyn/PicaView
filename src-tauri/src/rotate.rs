@@ -205,6 +205,21 @@ fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), St
             enc.encode(rotated.as_bytes(), rotated.width(), rotated.height(), color)
                 .map_err(|e| format!("WebP 编码失败: {e}"))?;
         }
+        ImageFormat::Png => {
+            // 重编码会丢掉 iCCP 之外的辅助块，至少把 ICC 配置文件写回去，避免色彩偏移
+            use image::ImageEncoder as _;
+            let mut enc = image::codecs::png::PngEncoder::new(&mut out);
+            if let Some(icc) = png_icc_profile(p) {
+                let _ = enc.set_icc_profile(icc);
+            }
+            enc.write_image(
+                rotated.as_bytes(),
+                rotated.width(),
+                rotated.height(),
+                image::ExtendedColorType::from(rotated.color()),
+            )
+            .map_err(|e| format!("PNG 编码失败: {e}"))?;
+        }
         _ => {
             rotated
                 .write_to(&mut Cursor::new(&mut out), fmt)
@@ -212,6 +227,14 @@ fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), St
         }
     }
     replace_file(p, &out)
+}
+
+/// 读取 PNG 内嵌的 ICC 配置文件（没有则 None）
+fn png_icc_profile(p: &Path) -> Option<Vec<u8>> {
+    use image::ImageDecoder as _;
+    let f = std::fs::File::open(p).ok()?;
+    let mut dec = image::codecs::png::PngDecoder::new(std::io::BufReader::new(f)).ok()?;
+    dec.icc_profile().ok().flatten().filter(|v| !v.is_empty())
 }
 
 // ---------- 原子替换 ----------
@@ -593,6 +616,31 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"new-content");
         let leftovers = std::fs::read_dir(&dir).unwrap().flatten().count();
         assert_eq!(leftovers, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_rotation_preserves_icc_profile() {
+        use image::ImageEncoder as _;
+        let dir = std::env::temp_dir().join(format!("pv-rot-png-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.png");
+        let icc: Vec<u8> = (0..64u8).collect();
+        {
+            let img = image::RgbImage::from_fn(8, 4, |x, y| image::Rgb([x as u8, y as u8, 7]));
+            let f = std::fs::File::create(&p).unwrap();
+            let mut enc = image::codecs::png::PngEncoder::new(f);
+            enc.set_icc_profile(icc.clone()).unwrap();
+            enc.write_image(img.as_raw(), 8, 4, image::ExtendedColorType::Rgb8)
+                .unwrap();
+        }
+        // 重编码旋转后：尺寸交换，ICC 仍在
+        let fmt = sniff(&p).unwrap();
+        rotate_reencode(&p, fmt, true).unwrap();
+        let dec = image::load_from_memory(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!((dec.width(), dec.height()), (4, 8));
+        assert_eq!(png_icc_profile(&p), Some(icc));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

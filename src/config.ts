@@ -19,6 +19,16 @@ export const TIER_SCALE = 1.25;
 export const TIER_MIN_VIEWPORT_PX = 64;
 /** tier 位图宽度的下限：避免极小视口解出 1px 的垃圾位图 */
 export const TIER_MIN_PX = 256;
+/**
+ * 全图解码上限：位图长边 = 视口设备长边 × 该系数。
+ * 放大到该系数以内都还是"不放大位图"，再往上后台补一次原图（见 LOD_UPGRADE_SCALE）。
+ */
+export const LOD_VIEW_SCALE = 2;
+/** 全图解码长边下限：窗口很小时也不至于解得太糙 */
+export const LOD_MIN_LONG_SIDE = 2048;
+/** 每个源像素摊到的设备像素达到该值（约等于放大到 100%）时，后台补原图 */
+export const LOD_UPGRADE_AT = 0.75;
+
 /** 动图/兜底 img 通道 blob URL 池容量 */
 export const BLOB_URL_POOL_MAX = 3;
 /** loading 指示延迟显示，快速加载不闪烁 */

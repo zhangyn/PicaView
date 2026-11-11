@@ -16,6 +16,10 @@ export interface Placement {
 export interface SetBitmapOpts {
   alpha?: boolean;      // 可能有透明区域，显示棋盘格
   transition?: boolean; // 交叉淡入
+  /** 保持当前缩放/平移（tier、LOD 等"同一张图换更高分辨率"的静默替换） */
+  keepView?: boolean;
+  /** 源图像显示宽度：位图是降采样结果时用它换算百分比（缺省视为位图即原图） */
+  srcWidth?: number;
 }
 
 export interface PaintOpts {
@@ -42,6 +46,8 @@ export class Viewer {
   dpr = 1;
   view: Placement | null = null;
   private bitmap: ImageBitmap | null = null;
+  /** 位图像素 / 源像素（LOD 降采样时 < 1）；百分比一律按源像素口径给用户看 */
+  private ratio = 1;
   animated = false;
   private alpha = false;
   /** 当前视图是否处于"适应窗口"状态（用户未手动缩放/平移） */
@@ -161,6 +167,11 @@ export class Viewer {
     return this.fitScaleFor(this.view.iw, this.view.ih, this.cw, this.ch);
   }
 
+  /** 位图像素 / 源像素；LOD 图为 < 1 的数 */
+  get lodRatio(): number {
+    return this.ratio;
+  }
+
   isZoomed(): boolean {
     if (!this.view) return false;
     return this.view.scale > this.fitScale * 1.02;
@@ -168,24 +179,28 @@ export class Viewer {
 
   zoomPct(): number {
     if (!this.view) return 100;
-    return (this.view.scale / this.dpr) * 100;
+    return ((this.view.scale * this.ratio) / this.dpr) * 100;
   }
 
   /** 适应窗口时的百分比（供滑块标定） */
   fitPct(): number {
     if (!this.view) return 100;
-    return (this.fitScale / this.dpr) * 100;
+    return ((this.fitScale * this.ratio) / this.dpr) * 100;
   }
 
-  /** 按百分比设置缩放（以视口中心为锚点） */
+  /** 按百分比设置缩放（以视口中心为锚点；百分比按源像素口径） */
   setZoomPct(pct: number) {
     if (!this.view) return;
-    this.setScaleAtDevice((pct / 100) * this.dpr, this.cw / 2, this.ch / 2);
+    this.setScaleAtDevice(((pct / 100) * this.dpr) / this.ratio, this.cw / 2, this.ch / 2);
   }
 
   // ---------- 内容管理 ----------
 
-  /** 显示静图位图。预览升级到全图时重算 fit */
+  /**
+   * 显示静图位图。默认回到"适应窗口"；
+   * keepView 用于同一张图的更高分辨率替换（tier → 全图、LOD → 原图）：
+   * 位图像素变多时缩放比同比缩小，屏幕上的位置与大小完全不变。
+   */
   setBitmap(bmp: ImageBitmap, opts: SetBitmapOpts) {
     this.animated = false;
     this.animImg.style.display = "none";
@@ -193,23 +208,40 @@ export class Viewer {
     this.canvB.style.visibility = "";
     this.alpha = !!opts.alpha;
     this.checker.classList.toggle("show", this.alpha);
+    this.ratio = opts.srcWidth && opts.srcWidth > 0 ? bmp.width / opts.srcWidth : 1;
 
     const old = this.bitmap;
+    const prev = this.view;
+    const keep = !!opts.keepView && prev !== null;
 
-    if (opts.transition && old) {
-      // 画到备用画布再淡入
-      const target = this.active === this.canvA ? this.canvB : this.canvA;
-      this.drawFittedTo(target, bmp);
-      this.swap(target);
+    if (keep && prev) {
+      const r = prev.iw > 0 ? bmp.width / prev.iw : 1;
+      this.view = {
+        iw: bmp.width,
+        ih: bmp.height,
+        scale: prev.scale / (r || 1),
+        tx: prev.tx,
+        ty: prev.ty,
+      };
+      this.clampPlacement();
+      this.drawTo(this.active, bmp, this.view);
     } else {
-      this.drawFittedTo(this.active, bmp);
+      if (opts.transition && old) {
+        // 画到备用画布再淡入
+        const target = this.active === this.canvA ? this.canvB : this.canvA;
+        this.drawFittedTo(target, bmp);
+        this.swap(target);
+      } else {
+        this.drawFittedTo(this.active, bmp);
+      }
+      // 视图状态：先置单位变换，再 fit 计算居中
+      this.view = { iw: bmp.width, ih: bmp.height, scale: 1, tx: 0, ty: 0 };
     }
 
     this.bitmap = bmp;
-    // 视图状态：先置单位变换，再 fit 计算居中
-    this.view = { iw: bmp.width, ih: bmp.height, scale: 1, tx: 0, ty: 0 };
-    this.fit();
     old?.close();
+    if (keep) this.paint();
+    else this.fit(); // fit 内部会绘制
   }
 
   /**
@@ -230,6 +262,7 @@ export class Viewer {
     this.bitmap = null;
     this.animated = true;
     this.alpha = alpha;
+    this.ratio = 1;
     this.checker.classList.toggle("show", alpha);
     this.syncImgMask();
     // 视图尺寸取自然尺寸
@@ -247,6 +280,7 @@ export class Viewer {
     this.bitmap = null;
     this.view = null;
     this.animated = false;
+    this.ratio = 1;
     this.animImg.removeAttribute("src");
     this.animImg.style.display = "none";
     this.animImg.classList.remove("masked");
@@ -273,16 +307,17 @@ export class Viewer {
     this.paint();
   }
 
-  /** 100% = 1 图像像素 : 1 设备像素（HiDPI 下即"实际大小"） */
+  /** 100% = 1 源像素 : 1 设备像素（HiDPI 下即"实际大小"；LOD 图会按源像素换算） */
   actualSize() {
     if (!this.view) return;
-    this.setScaleAtDevice(this.dpr, this.cw / 2, this.ch / 2);
+    this.setScaleAtDevice(this.dpr / this.ratio, this.cw / 2, this.ch / 2);
   }
 
   /** 双击切换 适配窗口 ↔ 实际大小 */
   toggleFitActual() {
     if (!this.view) return;
-    if (this.isZoomed() || Math.abs(this.view.scale - this.dpr) < 0.01) {
+    const actual = this.dpr / this.ratio;
+    if (this.isZoomed() || Math.abs(this.view.scale - actual) < 0.01 * actual) {
       this.fit();
     } else {
       this.actualSize();
@@ -299,7 +334,8 @@ export class Viewer {
     const p = this.view;
     if (!p) return;
     const min = this.fitScale * ZOOM_MIN_FACTOR;
-    const max = Math.max(ZOOM_MAX_SCALE, this.fitScale * 2);
+    // 上限至少要放得下"实际大小"：LOD 图的实际大小是 dpr / ratio
+    const max = Math.max(ZOOM_MAX_SCALE, this.fitScale * 2, (this.dpr / this.ratio) * 2);
     s2 = Math.min(Math.max(s2, min), max);
     const f = s2 / p.scale;
     p.tx = cxDev - (cxDev - p.tx) * f;

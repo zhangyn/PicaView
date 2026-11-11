@@ -18,13 +18,26 @@ pub(crate) fn load(path: &str) -> Option<exif::Exif> {
     exif::Reader::new().read_from_container(&mut br).ok()
 }
 
-fn find_tag<'a>(ex: &'a exif::Exif, tag: exif::Tag) -> Option<&'a exif::Field> {
+fn find_tag(ex: &exif::Exif, tag: exif::Tag) -> Option<&exif::Field> {
     ex.fields().find(|f| f.tag == tag)
 }
 
 fn orientation_of(ex: &exif::Exif) -> u32 {
     find_tag(ex, exif::Tag::Orientation)
         .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1)
+}
+
+/// 直接从内存字节读取 EXIF 方向（省去为读方向再开一次文件）。
+/// 非 JPEG 容器或解析失败一律按 1（不变换）处理。
+pub fn orientation_of_bytes(data: &[u8]) -> u32 {
+    if !is_jpeg_magic(data) {
+        return 1;
+    }
+    let mut cur = std::io::Cursor::new(data);
+    exif::Reader::new()
+        .read_from_container(&mut cur)
+        .map(|ex| orientation_of(&ex))
         .unwrap_or(1)
 }
 
@@ -166,6 +179,13 @@ mod tests {
 
     fn at(img: &GrayImage, x: u32, y: u32) -> u8 {
         img.get_pixel(x, y).0[0]
+    }
+
+    #[test]
+    fn orientation_of_bytes_defaults_to_one() {
+        assert_eq!(orientation_of_bytes(b"not a jpeg at all"), 1);
+        assert_eq!(orientation_of_bytes(b"\x89PNG\r\n\x1a\n"), 1);
+        assert_eq!(orientation_of_bytes(b""), 1);
     }
 
     #[test]

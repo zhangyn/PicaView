@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { showDialog } from "./dialog";
-import { IMAGE_EXTS, hasImageExtension, toast } from "./util";
+import { IMAGE_EXTS, extOf, hasImageExtension, toast } from "./util";
 import type { ImageEntry } from "./types";
 
 export interface OpsCallbacks {
@@ -36,6 +36,10 @@ export class Ops {
     try {
       await invoke("rotate", { path: entry.path, clockwise });
       this.cb.onRotated(entry.path);
+      // image 的 WebP 编码器只有无损档：有损 WebP 旋转后体积可能明显变大，明确告知
+      if (extOf(entry.path) === "webp") {
+        toast("已旋转（WebP 按无损重编码，文件可能变大）", 4000);
+      }
     } catch (e) {
       toast(`旋转失败：${String(e)}`);
     }
