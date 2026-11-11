@@ -32,6 +32,8 @@ export class Filmstrip {
   private loadedCount = 0;
   /** 列表代数：目录切换/重建后，旧请求的结果直接丢弃 */
   private gen = 0;
+  /** path → 内容版本：就地改写（旋转）后自增，使在途的缩略图请求作废 */
+  private ver = new Map<string, number>();
   private io: IntersectionObserver;
   private queue: TaskQueue;
   visible = true;
@@ -82,6 +84,7 @@ export class Filmstrip {
   /** 列表整体变化（打开新目录）时重建 DOM */
   rebuild(entries: ImageEntry[], currentPath: string | null) {
     this.gen++;
+    this.ver.clear();
     this.io.disconnect();
     this.queue.clear();
     this.strip.textContent = "";
@@ -126,9 +129,24 @@ export class Filmstrip {
     for (let i = n.idx; i < this.nodes.length; i++) this.nodes[i].idx = i;
     this.byPath.delete(path);
     this.byEl.delete(n.el);
+    this.ver.delete(path);
     this.wanted.delete(path);
     this.around.delete(path);
     if (this.curNode === n) this.curNode = null;
+  }
+
+  /** 文件内容变化（旋转等）后调用：丢弃旧像素并重新请求（缓存键含 mtime/大小，会重新生成） */
+  invalidate(path: string) {
+    const n = this.byPath.get(path);
+    if (!n) return;
+    this.ver.set(path, (this.ver.get(path) ?? 0) + 1); // 作废在途请求
+    this.queue.cancel(path);
+    if (n.loaded) {
+      n.loaded = false;
+      this.loadedCount--;
+    }
+    n.el.width = 0; // 释放旧像素
+    this.enqueue(n);
   }
 
   /** 请求当前图附近的缩略图（优先加载，并保证不被释放） */
@@ -173,18 +191,26 @@ export class Filmstrip {
   private enqueue(n: ThumbNode) {
     if (n.loaded || n.removed) return;
     const gen = this.gen;
-    this.queue.push(n.path, () => this.fetchThumb(n, gen));
+    const ver = this.ver.get(n.path) ?? 0;
+    this.queue.push(n.path, () => this.fetchThumb(n, gen, ver));
   }
 
-  private async fetchThumb(n: ThumbNode, gen: number) {
-    // 出队时再确认一次：期间可能已离开视口/被删除/目录已切换
+  /** 结果是否仍然有效：目录没换、路径没变、内容版本没变、仍需要它 */
+  private stillWanted(n: ThumbNode, gen: number, path: string, ver: number): boolean {
+    return gen === this.gen && n.path === path && !n.removed &&
+      ver === (this.ver.get(path) ?? 0) && this.isWanted(n);
+  }
+
+  private async fetchThumb(n: ThumbNode, gen: number, ver: number) {
+    // 出队时再确认一次：期间可能已离开视口/被删除/目录已切换/文件已旋转
     if (gen !== this.gen || !this.isWanted(n) || n.loaded) return;
     const path = n.path;
+    if (ver !== (this.ver.get(path) ?? 0)) return;
     const buf = await invoke<ArrayBuffer>("thumbnail", { path });
-    if (gen !== this.gen || n.path !== path || !this.isWanted(n)) return; // 过期：丢弃
+    if (!this.stillWanted(n, gen, path, ver)) return; // 过期：丢弃
     if (buf.byteLength === 0) return;
     const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
-    if (gen !== this.gen || n.path !== path || !this.isWanted(n)) {
+    if (!this.stillWanted(n, gen, path, ver)) {
       bmp.close();
       return;
     }

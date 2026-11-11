@@ -125,6 +125,20 @@ export class Viewer {
     p.scale *= this.dpr / prev.dpr;
     p.tx = this.cw / 2 - ix * p.scale;
     p.ty = this.ch / 2 - iy * p.scale;
+    this.clampPlacement();
+  }
+
+  /**
+   * 交互后的视图约束：小于视口的轴居中，大于视口的轴不留空隙。
+   * 没有它时可以把图片整张拖出视口，只留下空白，用户只能靠双击恢复。
+   */
+  private clampPlacement() {
+    const p = this.view;
+    if (!p) return;
+    const w = p.iw * p.scale;
+    const h = p.ih * p.scale;
+    p.tx = w <= this.cw ? (this.cw - w) / 2 : Math.min(0, Math.max(this.cw - w, p.tx));
+    p.ty = h <= this.ch ? (this.ch - h) / 2 : Math.min(0, Math.max(this.ch - h, p.ty));
   }
 
   private get cw() { return this.active.width; }
@@ -292,6 +306,7 @@ export class Viewer {
     p.ty = cyDev - (cyDev - p.ty) * f;
     p.scale = s2;
     this.fitted = false;
+    this.clampPlacement();
     this.markInteracting();
     this.paint();
   }
@@ -303,6 +318,7 @@ export class Viewer {
     p.tx += dx * this.dpr;
     p.ty += dy * this.dpr;
     this.fitted = false;
+    this.clampPlacement();
     this.markInteracting();
     this.paint();
   }

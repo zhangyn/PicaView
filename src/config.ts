@@ -15,6 +15,10 @@ export const PRELOAD_CONCURRENCY = 2;
 export const TIER_MAX = 6;
 /** tier 宽度 = 视口设备像素宽 × 该系数 */
 export const TIER_SCALE = 1.25;
+/** 视口宽度小于该值时视为"窗口不可用"（隐藏/最小化），不生成 tier */
+export const TIER_MIN_VIEWPORT_PX = 64;
+/** tier 位图宽度的下限：避免极小视口解出 1px 的垃圾位图 */
+export const TIER_MIN_PX = 256;
 /** 动图/兜底 img 通道 blob URL 池容量 */
 export const BLOB_URL_POOL_MAX = 3;
 /** loading 指示延迟显示，快速加载不闪烁 */
@@ -34,6 +38,12 @@ export const KEY_ZOOM_STEP = 1.25;
 export const KEY_PAN_RATIO = 0.15;
 /** 滚轮缩放：每 100 个 delta 的缩放底数 */
 export const WHEEL_ZOOM_BASE = 1.2;
+/** 滚轮 deltaMode=行(1) 时换算成像素当量的系数（Chromium 默认行高） */
+export const WHEEL_LINE_PX = 16;
+/** 滚轮 deltaMode=页(2) 时换算成像素当量的系数 */
+export const WHEEL_PAGE_PX = 400;
+/** 单次滚轮事件的最大像素当量，避免高速滚动一帧跳太远 */
+export const WHEEL_DELTA_CAP = 300;
 /** 缩放滑块上限（百分比） */
 export const SLIDER_MAX_PCT = 400;
 /** 缩放滑块下限 = 适应百分比 × 该系数 */

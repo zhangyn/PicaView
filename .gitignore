@@ -15,6 +15,10 @@ Snipaste_*.png
 *.log
 *.tmp
 
+# 本地工具产物（不参与构建）
+.atl/
+.codegraph/
+
 # IDE / 系统
 .vscode/
 .idea/

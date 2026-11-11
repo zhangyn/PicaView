@@ -18,11 +18,12 @@ import { TaskQueue } from "./queue";
 import {
   BLOB_URL_POOL_MAX, FULL_LOAD_DEBOUNCE_MS, KEEPALIVE_MS, KEY_PAN_RATIO, KEY_ZOOM_STEP,
   LIGHTBOX_FIT_RATIO, LIGHTBOX_HINT_MS, LOADING_DELAY_MS, PRELOAD_CONCURRENCY, PRELOAD_DELAY_MS,
-  SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX, TIER_SCALE,
-  WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
+  SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX, TIER_MIN_PX,
+  TIER_MIN_VIEWPORT_PX, TIER_SCALE, WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
 } from "./config";
 import {
-  attachIdleHider, dirname, isImageExt, isJpeg, isOpaqueExt, pathKey, peekImageSize, setTitle, toast,
+  attachIdleHider, dirname, isImageExt, isJpeg, isOpaqueExt, normalizeWheelDelta, pathKey,
+  peekImageSize, setTitle, toast,
 } from "./util";
 
 let entries: ImageEntry[] = [];
@@ -42,7 +43,9 @@ const details = new DetailsPanel();
 const ops = new Ops({
   onRotated: (path) => {
     invalidateTier(path);
-    if (entries[index] && entries[index].path === path) void showCurrent(false);
+    strip.invalidate(path); // 胶片条里的缩略图还是旋转前的，必须重新生成
+    void refreshEntryMeta(path); // 无损旋转会改动文件大小/修改时间
+    if (entries[index] && pathKey(entries[index].path) === pathKey(path)) void showCurrent(false);
   },
 });
 
@@ -283,6 +286,16 @@ async function statEntry(path: string): Promise<ImageEntry | null> {
   }
 }
 
+/** 就地改写文件（旋转）后回读元数据，修正列表与信息栏里的旧大小/时间 */
+async function refreshEntryMeta(path: string) {
+  const st = await statEntry(path);
+  if (!st) return;
+  const i = entries.findIndex((e) => pathKey(e.path) === pathKey(path));
+  if (i < 0) return;
+  entries[i] = st;
+  if (i === index) info.setPosition(st, index, entries.length);
+}
+
 function afterListChange() {
   strip.rebuild(entries, currentPath());
   strip.ensureAround(entries, Math.max(0, index));
@@ -444,9 +457,12 @@ function preloadTier(i: number) {
   const path = entry.path;
   preloadQueue.push(path, async () => {
     if (!isNearCurrent(path)) return; // 排队期间用户已翻远
+    // 窗口隐藏/最小化时 clientWidth 可能为 0：此时不能按 resizeWidth=1 解出垃圾位图
+    const cw = stage.clientWidth;
+    if (cw < TIER_MIN_VIEWPORT_PX) return;
     const ver = tierVer.get(path) ?? 0;
     const buf = await readImageBuf(path);
-    const target = Math.max(1, Math.round(stage.clientWidth * viewer.dpr * TIER_SCALE));
+    const target = Math.max(TIER_MIN_PX, Math.round(cw * viewer.dpr * TIER_SCALE));
     const opts: ImageBitmapOptions = {
       resizeWidth: target, // 只给宽度：保持宽高比；resize 作用于 EXIF 旋转后的图
       resizeQuality: "high",
@@ -650,10 +666,14 @@ viewer.onPaint = (pct) => {
 stage.addEventListener("wheel", (e) => {
   e.preventDefault();
   if (!viewer.view) return;
+  // deltaMode 归一化：行/页模式的原始 deltaY 很小或很大，直接套指数会让缩放失灵或跳变
+  const delta = normalizeWheelDelta(e);
+  if (!delta) return;
   const rect = stage.getBoundingClientRect();
   const cx = e.clientX - rect.left;
   const cy = e.clientY - rect.top;
-  const factor = Math.pow(WHEEL_ZOOM_BASE, -Math.sign(e.deltaY) * Math.min(3, Math.abs(e.deltaY) / 100));
+  // 每 100 像素当量 = 一档 WHEEL_ZOOM_BASE，单次事件最多 3 档
+  const factor = Math.pow(WHEEL_ZOOM_BASE, -Math.sign(delta) * Math.min(3, Math.abs(delta) / 100));
   viewer.zoomAt(cx, cy, factor);
 }, { passive: false });
 
@@ -687,11 +707,14 @@ stage.addEventListener("pointermove", (e) => {
   lastY = e.clientY;
 });
 
-stage.addEventListener("pointerup", (e) => {
+/** 结束拖拽：pointerup 与 pointercancel（Alt+Tab、触摸中断等）共用 */
+function endPan(e: PointerEvent) {
   panning = false;
   stage.style.cursor = "";
   if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
-});
+}
+stage.addEventListener("pointerup", endPan);
+stage.addEventListener("pointercancel", endPan);
 
 // 灯箱模式：点击图片外（非拖拽）退出，还原 Picasa 行为
 stage.addEventListener("click", (e) => {
@@ -832,9 +855,10 @@ window.addEventListener("keydown", (e) => {
       void doDelete(e.shiftKey);
       break;
     case "Escape": {
-      // 优先级：确认对话框（上面已返回）> 详情面板 > 幻灯片 > 关闭窗口
+      // 优先级：确认对话框（上面已返回）> 详情面板 > 幻灯片 > 灯箱 > 关闭窗口
       if (details.isOpen) { details.close(); break; }
       if (slideshow.playing) { slideshow.stop(); break; }
+      if (lightboxOn) { void applyFullscreen(false); break; }
       void getCurrentWindow().close();
       break;
     }
@@ -919,18 +943,13 @@ async function toggleFrameless() {
 // ---------- 蒙板 ----------
 
 function toggleMask() {
-  viewer.setMask(!viewer.maskOn);
-  maskBtn.classList.toggle("active", viewer.maskOn);
-}
-
-/** 蒙板按钮 = 灯箱模式开关：进入全屏灯箱 / 退出还原 */
-async function maskLightbox() {
-  const w = getCurrentWindow();
-  if (await w.isFullscreen()) {
-    await applyFullscreen(false);
+  // 灯箱模式的压暗由页面覆盖层负责（#lightbox-mask），再开 canvas 蒙板会叠成两层
+  if (lightboxOn) {
+    toast("灯箱模式已自带压暗，Esc 或点击图片外退出");
     return;
   }
-  await applyFullscreen(true);
+  viewer.setMask(!viewer.maskOn);
+  maskBtn.classList.toggle("active", viewer.maskOn);
 }
 
 // ---------- 控制按钮 ----------
@@ -967,7 +986,7 @@ emptyEl.addEventListener("dblclick", (e) => {
   if (e.target instanceof Element && e.target.closest("button")) return;
   void openFileDialog();
 });
-document.getElementById("btn-mask")!.addEventListener("click", () => void maskLightbox());
+document.getElementById("btn-mask")!.addEventListener("click", () => toggleMask());
 document.getElementById("btn-frameless")!.addEventListener("click", () => void toggleFrameless());
 document.getElementById("btn-filmstrip")!.addEventListener("click", () => strip.toggle());
 document.getElementById("btn-fullscreen")!.addEventListener("click", () => void toggleFullscreen());

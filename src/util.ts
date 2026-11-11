@@ -1,7 +1,9 @@
 // 通用小工具
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { IDLE_HIDE_MS, TOAST_MS } from "./config";
+import {
+  IDLE_HIDE_MS, TOAST_MS, WHEEL_DELTA_CAP, WHEEL_LINE_PX, WHEEL_PAGE_PX,
+} from "./config";
 
 export function extOf(path: string): string {
   const i = path.lastIndexOf(".");
@@ -29,6 +31,16 @@ export function isOpaqueExt(path: string): boolean {
 export function isJpeg(path: string): boolean {
   const e = extOf(path);
   return e === "jpg" || e === "jpeg";
+}
+
+/**
+ * 滚轮增量归一化：deltaMode 0=像素 / 1=行 / 2=页，统一换算成像素当量并限幅。
+ * 不换算时，行模式（deltaY≈3）下缩放几乎不动，页模式又会一下跳到底。
+ */
+export function normalizeWheelDelta(e: WheelEvent, cap = WHEEL_DELTA_CAP): number {
+  const unit = e.deltaMode === 1 ? WHEEL_LINE_PX : e.deltaMode === 2 ? WHEEL_PAGE_PX : 1;
+  const d = e.deltaY * unit;
+  return Math.max(-cap, Math.min(cap, d));
 }
 
 export function humanSize(n: number): string {
