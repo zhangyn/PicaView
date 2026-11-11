@@ -20,8 +20,13 @@ export class InfoBar {
   }
 
   toggle() {
-    this.visible = !this.visible;
-    this.root.classList.toggle("hidden2", !this.visible);
+    this.setVisible(!this.visible);
+  }
+
+  /** 显示/隐藏（启动时按设置恢复） */
+  setVisible(v: boolean) {
+    this.visible = v;
+    this.root.classList.toggle("hidden2", !v);
   }
 
   /** 打开文件后立即更新（尺寸信息稍后补） */

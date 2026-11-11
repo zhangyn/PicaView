@@ -108,13 +108,40 @@ pub struct ImageDetails {
     /// 无 EXIF（或读取失败）时为 null
     pub shot: Option<ShotSection>,
     pub gps: Option<GpsSection>,
+    /// 256 档亮度直方图（由缩略图统计，取不到缩略图时为 null）
+    pub histogram_luma: Option<Vec<u32>>,
 }
 
 // ---------- 命令 ----------
 
 #[tauri::command]
-pub async fn get_image_details(path: String) -> Result<ImageDetails, String> {
-    crate::imgscan::run_blocking(move || details_blocking(&path)).await
+pub async fn get_image_details(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ImageDetails, String> {
+    crate::imgscan::run_blocking(move || {
+        let mut d = details_blocking(&path)?;
+        d.histogram_luma = luma_histogram(&app, &path);
+        Ok(d)
+    })
+    .await
+}
+
+/// 用缩略图（240px，通常已在磁盘缓存里）统计亮度直方图：
+/// 一次读缓存 + 四万像素，比在主画布上 getImageData 便宜得多，也不影响 GPU 光栅化
+fn luma_histogram(app: &tauri::AppHandle, path: &str) -> Option<Vec<u32>> {
+    let bytes = crate::thumbs::thumb_bytes_sync(app, path).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?;
+    Some(luma_bins(&img.to_luma8()))
+}
+
+/// 256 档亮度分布
+fn luma_bins(img: &image::GrayImage) -> Vec<u32> {
+    let mut bins = vec![0u32; 256];
+    for px in img.pixels() {
+        bins[px.0[0] as usize] += 1;
+    }
+    bins
 }
 
 /// 在资源管理器中定位并选中文件
@@ -622,7 +649,13 @@ fn build_details(lp: &Path, ext: &str, md: &fs::Metadata) -> ImageDetails {
     let shot = ex.as_ref().map(shot_of).filter(|s| !s.is_empty());
     let gps = ex.as_ref().and_then(gps_of);
 
-    ImageDetails { file, image, shot, gps }
+    ImageDetails {
+        file,
+        image,
+        shot,
+        gps,
+        histogram_luma: None, // 由命令层补（需要 AppHandle 定位缩略图缓存）
+    }
 }
 
 // ---------- 资源管理器定位 ----------
@@ -673,6 +706,20 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::path::PathBuf;
+
+    #[test]
+    fn luma_bins_counts_every_pixel() {
+        let img = image::GrayImage::from_raw(2, 2, vec![0, 0, 128, 255]).unwrap();
+        let bins = luma_bins(&img);
+        assert_eq!(bins.len(), 256);
+        assert_eq!(bins[0], 2);
+        assert_eq!(bins[128], 1);
+        assert_eq!(bins[255], 1);
+        assert_eq!(bins.iter().sum::<u32>(), 4);
+        // 全黑图不应越界/溢出
+        let black = image::GrayImage::new(1, 1);
+        assert_eq!(luma_bins(&black).iter().sum::<u32>(), 1);
+    }
 
     #[test]
     fn sniff_by_magic() {

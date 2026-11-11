@@ -125,6 +125,33 @@ pub async fn thumbnail(app: tauri::AppHandle, path: String) -> Result<Response, 
     }
 }
 
+/// 解码用于"输出"的图（复制到剪贴板 / 设为壁纸）：长边不超过 max_side，等比、不放大
+pub fn decode_at(p: &Path, max_side: u32) -> Result<image::DynamicImage, String> {
+    let img = match jpeg_scaled(p, max_side as usize) {
+        Ok(img) => img,
+        Err(_) => decode_full(p)?,
+    };
+    Ok(if img.width() > max_side || img.height() > max_side {
+        img.thumbnail(max_side, max_side)
+    } else {
+        img
+    })
+}
+
+/// 同步取缩略图字节：缓存命中直接读，未命中就生成并落盘。
+/// 给直方图这类"顺手要一张缩略图"的场景用，调用方必须已在阻塞线程里。
+pub fn thumb_bytes_sync(app: &tauri::AppHandle, path: &str) -> Result<Vec<u8>, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("thumbs");
+    match lookup(path, &cache_dir)? {
+        Lookup::Hit(bytes) => Ok(bytes),
+        Lookup::Miss { src, cache_file } => generate_and_store(&src, &cache_file),
+    }
+}
+
 fn generate(p: &Path) -> Result<Vec<u8>, String> {
     // JPEG 先走 turbojpeg 的 DCT 域缩放解码：只解到接近目标尺寸，
     // 峰值内存与耗时都远低于"整图解码再缩"；失败（非 JPEG/损坏）则退回通用解码

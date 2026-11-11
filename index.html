@@ -48,6 +48,12 @@
 
     <!-- 主控制按钮（右下）+ 缩放滑块 -->
     <div id="controls">
+      <select id="sort-mode" title="排序方式" aria-label="排序方式">
+        <option value="name">名称 ↑</option>
+        <option value="name_desc">名称 ↓</option>
+        <option value="modified">修改时间</option>
+        <option value="size">文件大小</option>
+      </select>
       <input id="zoom-slider" type="range" min="0" max="100" step="0.5" title="缩放比例" aria-label="缩放比例" />
       <span id="zoom-pct">100%</span>
       <button type="button" id="btn-rot-ccw" title="向左旋转 (L)" aria-label="向左旋转 (L)"></button>
@@ -58,6 +64,19 @@
       <button type="button" id="btn-frameless" title="只看图片：隐藏标题栏 (B)" aria-label="只看图片：隐藏标题栏 (B)"></button>
       <button type="button" id="btn-filmstrip" title="胶片条 (T)" aria-label="胶片条 (T)"></button>
       <button type="button" id="btn-fullscreen" title="全屏 (Enter)" aria-label="全屏 (Enter)"></button>
+      <button type="button" id="btn-more" title="更多操作" aria-label="更多操作" aria-haspopup="true" aria-expanded="false"></button>
+    </div>
+
+    <!-- 更多操作菜单（复制图片/文件、设为壁纸） -->
+    <div id="more-menu" class="hidden" role="menu" aria-label="更多操作">
+      <button type="button" role="menuitem" data-act="copy-image">复制图片<kbd>Ctrl+C</kbd></button>
+      <button type="button" role="menuitem" data-act="copy-file">复制文件<kbd>Ctrl+Shift+C</kbd></button>
+      <button type="button" role="menuitem" data-act="wallpaper">设为桌面壁纸</button>
+    </div>
+
+    <!-- 取色探针（C 键开关） -->
+    <div id="pixel-probe" class="hidden" aria-live="off">
+      <span class="pp-swatch"></span><span class="pp-text"></span>
     </div>
 
     <!-- 左右翻页大按钮 -->

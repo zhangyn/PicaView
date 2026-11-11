@@ -27,11 +27,11 @@ function validateName(name: string): string | null {
 export class Ops {
   constructor(private cb: OpsCallbacks) {}
 
-  /** 无损旋转；动图直接拒绝（Rust 侧也会兜底） */
-  async rotate(entry: ImageEntry, clockwise: boolean) {
+  /** 无损旋转；动图直接拒绝（Rust 侧也会兜底）。返回是否真的旋转成功 */
+  async rotate(entry: ImageEntry, clockwise: boolean): Promise<boolean> {
     if (entry.animated) {
       toast("动图暂不支持旋转");
-      return;
+      return false;
     }
     try {
       await invoke("rotate", { path: entry.path, clockwise });
@@ -40,8 +40,10 @@ export class Ops {
       if (extOf(entry.path) === "webp") {
         toast("已旋转（WebP 按无损重编码，文件可能变大）", 4000);
       }
+      return true;
     } catch (e) {
       toast(`旋转失败：${String(e)}`);
+      return false;
     }
   }
 

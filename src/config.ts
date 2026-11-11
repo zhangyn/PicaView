@@ -89,6 +89,15 @@ export const THUMB_CONCURRENCY = 4;
 /** IntersectionObserver 水平预取距离（相对胶片条宽度，约 2 屏） */
 export const THUMB_PREFETCH_MARGIN = "200%";
 
+// ---------- 输出 / 操作 ----------
+
+/** 复制到剪贴板的图片长边上限（聊天软件与文档用不到原图那么大，也免得剪贴板塞几百 MB） */
+export const COPY_IMAGE_MAX_SIDE = 4096;
+/** 设置落盘防抖：连点开关不必每次都写文件 */
+export const SETTINGS_SAVE_DEBOUNCE_MS = 400;
+/** 旋转撤销栈深度 */
+export const ROTATE_UNDO_MAX = 10;
+
 // ---------- 其他 ----------
 
 /** 控件闲置隐藏延迟 */

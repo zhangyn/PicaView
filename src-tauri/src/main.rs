@@ -1,11 +1,13 @@
 // 发布版隐藏控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod details;
 mod exifinfo;
 mod imgscan;
 mod ops;
 mod rotate;
+mod settings;
 mod thumbs;
 
 use tauri::{Emitter, Manager};
@@ -89,6 +91,11 @@ fn main() {
             rotate::rotate,
             ops::rename_file,
             ops::delete_file,
+            actions::copy_image,
+            actions::copy_files,
+            actions::set_wallpaper,
+            settings::get_settings,
+            settings::set_settings,
             cli_args,
             pick_image,
         ])

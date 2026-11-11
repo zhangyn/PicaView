@@ -14,13 +14,16 @@ import { Ops } from "./ops";
 import { dialogOpen } from "./dialog";
 import { DetailsPanel } from "./details";
 import { isPicking, pickImage } from "./picker";
+import { PixelProbe } from "./probe";
 import { TaskQueue } from "./queue";
+import { getSettings, loadSettings, updateSettings, type SortMode } from "./settings";
+import { MoreMenu, copyFiles, copyImage, setWallpaper, type MenuAction } from "./actions";
 import {
   BLOB_URL_POOL_MAX, FULL_LOAD_DEBOUNCE_MS, KEEPALIVE_MS, KEY_PAN_RATIO, KEY_ZOOM_STEP,
   LIGHTBOX_FIT_RATIO, LIGHTBOX_HINT_MS, LOADING_DELAY_MS, LOD_MIN_LONG_SIDE, LOD_UPGRADE_AT,
   LOD_VIEW_SCALE, PRELOAD_CONCURRENCY, PRELOAD_DELAY_MS,
-  SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX, TIER_MIN_PX,
-  TIER_MIN_VIEWPORT_PX, TIER_SCALE, WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
+  ROTATE_UNDO_MAX, SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX,
+  TIER_MIN_PX, TIER_MIN_VIEWPORT_PX, TIER_SCALE, WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
 } from "./config";
 import {
   attachIdleHider, dirname, isImageExt, isJpeg, isOpaqueExt, normalizeWheelDelta, pathKey,
@@ -56,6 +59,12 @@ const emptyEl = document.getElementById("empty")!;
 const zoomEl = document.getElementById("zoom-indicator")!;
 const errorEl = document.getElementById("load-error")!;
 const errorMsgEl = document.getElementById("load-error-msg")!;
+const sortSelect = document.getElementById("sort-mode") as HTMLSelectElement;
+const moreBtn = document.getElementById("btn-more") as HTMLButtonElement;
+const moreMenuEl = document.getElementById("more-menu")!;
+
+/** 取色探针：按 C 开关，值从源位图采样（不读主画布） */
+const probe = new PixelProbe(viewer, stage, document.getElementById("pixel-probe")!);
 
 // ---------- 邻图低清位图缓存（tier） ----------
 
@@ -212,7 +221,7 @@ function diag(msg: string) {
 type ListResult = { ok: true; list: ImageEntry[] } | { ok: false };
 
 function fetchList(dir: string): Promise<ListResult> {
-  return invoke<ImageEntry[]>("list_images", { dir }).then(
+  return invoke<ImageEntry[]>("list_images", { dir, sort: getSettings().sort }).then(
     (list): ListResult => ({ ok: true, list }),
     (): ListResult => ({ ok: false }),
   );
@@ -335,6 +344,7 @@ async function openImage(p: string, myOpen: number) {
 /** 打开图片前的灯箱介入：窗口已全屏则直接挂样式，否则进全屏 */
 async function engageLightboxForOpen() {
   if (lightboxOn) return;
+  if (!getSettings().lightbox) return; // 用户关掉了"打开即灯箱"
   const w = getCurrentWindow();
   if (await w.isFullscreen()) {
     enterLightbox();
@@ -359,6 +369,30 @@ async function refreshEntryMeta(path: string) {
   if (i < 0) return;
   entries[i] = st;
   if (i === index) info.setPosition(st, index, entries.length);
+}
+
+/** 排序变化：重新取列表并保持当前图片（不重新解码，只更新序号与胶片条位置） */
+async function reloadList() {
+  if (!listReady) return;
+  const cur = currentPath();
+  const dir = cur ? dirname(cur) : null;
+  if (!dir) return;
+  const myOpen = ++openToken;
+  listReady = false;
+  const res = await fetchList(dir);
+  if (myOpen !== openToken) return;
+  listReady = true;
+  if (!res.ok || !res.list.length) {
+    toast("无法按该方式排序");
+    return;
+  }
+  entries = res.list;
+  const i = cur ? findInList(entries, cur) : -1;
+  index = i >= 0 ? i : 0;
+  afterListChange();
+  info.setPosition(entries[index], index, entries.length);
+  strip.setCurrent(entries[index].path);
+  if (i < 0) void showCurrent(true); // 原图已不在列表里（被外部删除等）→ 显示新序第一张
 }
 
 function afterListChange() {
@@ -390,6 +424,7 @@ async function showCurrent(transition: boolean) {
   const token = ++loadToken;
   cancelPending();
   hideError();
+  probe.hide();
   details.setPath(entry ? entry.path : null);
   if (!entry) {
     setLoading(false);
@@ -616,6 +651,7 @@ function jumpTo(i: number) {
   const entry = entries[i];
   if (!entry) return;
   hideError();
+  probe.hide();
   index = i;
   details.setPath(entry.path);
   const token = ++loadToken;
@@ -650,7 +686,37 @@ function jumpTo(i: number) {
 
 async function doRotate(clockwise: boolean) {
   const entry = entries[index];
-  if (entry) await ops.rotate(entry, clockwise);
+  if (!entry) return;
+  if (await ops.rotate(entry, clockwise)) pushRotateUndo(entry.path, clockwise);
+}
+
+// ---------- 旋转撤销（Ctrl+Z） ----------
+
+/** 已成功的旋转（路径 + 方向），Ctrl+Z 做反向旋转即可回到原样 */
+const rotateUndo: { path: string; clockwise: boolean }[] = [];
+
+function pushRotateUndo(path: string, clockwise: boolean) {
+  rotateUndo.push({ path, clockwise });
+  if (rotateUndo.length > ROTATE_UNDO_MAX) rotateUndo.shift();
+}
+
+async function undoRotate() {
+  const last = rotateUndo.pop();
+  if (!last) {
+    toast("没有可撤销的旋转");
+    return;
+  }
+  try {
+    await invoke("rotate", { path: last.path, clockwise: !last.clockwise });
+    toast("已撤销上一次旋转");
+    invalidateTier(last.path);
+    strip.invalidate(last.path);
+    void refreshEntryMeta(last.path);
+    if (entries[index] && pathKey(entries[index].path) === pathKey(last.path)) void showCurrent(false);
+  } catch (e) {
+    // 失败不把记录塞回栈里，避免一直卡着一条撤不掉的记录
+    toast(`撤销失败：${String(e)}`);
+  }
 }
 
 async function doRename() {
@@ -779,6 +845,7 @@ stage.addEventListener("pointerdown", (e) => {
 });
 
 stage.addEventListener("pointermove", (e) => {
+  probe.onMove(e.clientX, e.clientY);
   if (!panning) return;
   if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) dragMoved = true;
   viewer.panBy(e.clientX - lastX, e.clientY - lastY);
@@ -835,6 +902,25 @@ window.addEventListener("keydown", (e) => {
   if (meta && !e.altKey && !e.shiftKey && (e.key === "o" || e.key === "O")) {
     e.preventDefault();
     void openFileDialog();
+    return;
+  }
+
+  // Ctrl+C：复制图片；Ctrl+Shift+C：复制文件（粘贴出来是文件而不是位图）
+  if (meta && !e.altKey && (e.key === "c" || e.key === "C")) {
+    e.preventDefault();
+    const p = currentPath();
+    if (!p) {
+      toast("没有打开的图片");
+      return;
+    }
+    void (e.shiftKey ? copyFiles([p]) : copyImage(p));
+    return;
+  }
+
+  // Ctrl+Z：撤销上一次旋转（删除走回收站，需要还原请到回收站里操作）
+  if (meta && !e.altKey && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+    e.preventDefault();
+    void undoRotate();
     return;
   }
 
@@ -899,11 +985,15 @@ window.addEventListener("keydown", (e) => {
       break;
     case "t":
     case "T":
-      strip.toggle();
+      toggleFilmstrip();
       break;
     case "i":
     case "I":
-      info.toggle();
+      toggleInfo();
+      break;
+    case "c":
+    case "C":
+      if (probe.toggle()) toast("取色：移动鼠标查看坐标与颜色，再按 C 关闭");
       break;
     case "d":
     case "D":
@@ -1019,6 +1109,18 @@ async function toggleFrameless() {
   }
 }
 
+// ---------- 胶片条 / 信息浮层（记住偏好） ----------
+
+function toggleFilmstrip() {
+  strip.toggle();
+  updateSettings({ filmstrip: strip.visible });
+}
+
+function toggleInfo() {
+  info.toggle();
+  updateSettings({ infobar: info.visible });
+}
+
 // ---------- 蒙板 ----------
 
 function toggleMask() {
@@ -1053,6 +1155,8 @@ function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
   svgIcon(`<rect x="2.5" y="7" width="19" height="10" rx="1.5"/><path d="M6.5 7v10M11 7v10M15.5 7v10M19.5 7v10M2.5 12h19" stroke-width="1.2"/>`);
 (document.getElementById("btn-fullscreen") as HTMLElement).innerHTML =
   svgIcon(`<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>`);
+(document.getElementById("btn-more") as HTMLElement).innerHTML =
+  svgIcon(`<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none"/>`);
 
 document.getElementById("btn-rot-ccw")!.addEventListener("click", () => void doRotate(false));
 document.getElementById("btn-rot-cw")!.addEventListener("click", () => void doRotate(true));
@@ -1067,7 +1171,7 @@ emptyEl.addEventListener("dblclick", (e) => {
 });
 document.getElementById("btn-mask")!.addEventListener("click", () => toggleMask());
 document.getElementById("btn-frameless")!.addEventListener("click", () => void toggleFrameless());
-document.getElementById("btn-filmstrip")!.addEventListener("click", () => strip.toggle());
+document.getElementById("btn-filmstrip")!.addEventListener("click", () => toggleFilmstrip());
 document.getElementById("btn-fullscreen")!.addEventListener("click", () => void toggleFullscreen());
 document.getElementById("nav-prev")!.addEventListener("click", () => nav(-1));
 document.getElementById("nav-next")!.addEventListener("click", () => nav(1));
@@ -1075,6 +1179,19 @@ document.getElementById("nav-next")!.addEventListener("click", () => nav(1));
 slideshow.onNext = () => nav(1, true);
 slideshow.fullscreenHandler = (on) => void applyFullscreen(on);
 slideshow.isFullscreen = () => getCurrentWindow().isFullscreen();
+
+sortSelect.addEventListener("change", () => {
+  updateSettings({ sort: sortSelect.value as SortMode });
+  void reloadList();
+});
+
+new MoreMenu(moreBtn, moreMenuEl, currentPath, (act: MenuAction) => {
+  const p = currentPath();
+  if (!p) return;
+  if (act === "copy-image") void copyImage(p);
+  else if (act === "copy-file") void copyFiles([p]);
+  else void setWallpaper(p);
+});
 
 strip.onPick = (i) => {
   // 点的就是当前图且显示正常：不重复加载（避免 tier 低清图闪一下）
@@ -1125,8 +1242,6 @@ listen<string>("open-file", (ev) => {
 // ---------- 启动 ----------
 
 attachIdleHider();
-strip.setVisible(true); // 默认显示胶片条
-document.body.classList.add("has-strip");
 
 /** 首帧就绪后显示窗口：白屏/隐形过渡全部发生在看不见的阶段 */
 function showWindowWhenReady() {
@@ -1141,13 +1256,25 @@ function showWindowWhenReady() {
 }
 
 (async () => {
+  // 先读设置：窗口是"隐藏创建 + 就绪后显示"，所以一切偏好在首帧之前生效
+  const s = await loadSettings();
+  sortSelect.value = s.sort;
+  strip.setVisible(s.filmstrip);
+  info.setVisible(s.infobar);
+  if (!s.lightbox) {
+    // 窗口按配置是全屏创建的：关掉"打开即灯箱"时要先退出全屏，否则首帧仍是铺满的灯箱
+    try {
+      await getCurrentWindow().setFullscreen(false);
+    } catch { /* 非 Tauri 环境（纯浏览器调试） */ }
+  }
+
   // 启动参数（文件关联 / 手动传入）
   try {
     const args = await invoke<string[]>("cli_args");
     const target = args.find((a) => a && !a.startsWith("-"));
     if (target) {
       // 窗口本身已按配置全屏，这里直接挂灯箱样式，首帧即蒙板+胶片条
-      enterLightbox();
+      if (s.lightbox) enterLightbox();
       showWindowWhenReady();
       await openPath(target);
       return;

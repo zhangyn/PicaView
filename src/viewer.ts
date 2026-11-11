@@ -60,6 +60,8 @@ export class Viewer {
   /** 灯箱模式下的适配比例：图片只占视口的一部分（Picasa 式适中展示） */
   fitRatio: number | null = null;
   private rafWatchdog = 0;
+  /** 取色用的 1×1 离屏画布（避免在主画布上 getImageData 触发 GPU 同步） */
+  private probeCtx: CanvasRenderingContext2D | null = null;
 
   /** 每次实际绘制后回调（用于缩放指示）；silent 绘制不触发 */
   onPaint: ((pct: number) => void) | null = null;
@@ -170,6 +172,26 @@ export class Viewer {
   /** 位图像素 / 源像素；LOD 图为 < 1 的数 */
   get lodRatio(): number {
     return this.ratio;
+  }
+
+  /**
+   * 取位图像素颜色（RGBA）。用 1×1 离屏画布从源位图采样：
+   * 主画布是 GPU 光栅化，getImageData 会触发 GPU→CPU 同步，鼠标一移动就掉帧。
+   */
+  sampleColor(bx: number, by: number): [number, number, number, number] | null {
+    const bmp = this.bitmap;
+    if (!bmp) return null;
+    if (bx < 0 || by < 0 || bx >= bmp.width || by >= bmp.height) return null;
+    if (!this.probeCtx) {
+      const cv = document.createElement("canvas");
+      cv.width = 1;
+      cv.height = 1;
+      this.probeCtx = cv.getContext("2d", { willReadFrequently: true });
+      if (!this.probeCtx) return null;
+    }
+    this.probeCtx.drawImage(bmp, bx, by, 1, 1, 0, 0, 1, 1);
+    const d = this.probeCtx.getImageData(0, 0, 1, 1).data;
+    return [d[0], d[1], d[2], d[3]];
   }
 
   isZoomed(): boolean {

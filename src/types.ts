@@ -72,4 +72,6 @@ export interface ImageDetails {
   image: DetailsImage;
   shot: DetailsShot | null;
   gps: DetailsGps | null;
+  /** 256 档亮度直方图（由缩略图统计）；取不到缩略图时为 null */
+  histogram_luma: number[] | null;
 }

@@ -1,6 +1,6 @@
 // 目录扫描与动图探测
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -38,6 +38,21 @@ pub fn diag_log(app: &tauri::AppHandle, msg: &str) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&file) {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+/// 目录排序方式（与前端下拉框、settings.json 里的字面量一一对应）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortMode {
+    /// 名称自然序（默认，与资源管理器一致）
+    #[default]
+    Name,
+    /// 名称自然序倒序
+    NameDesc,
+    /// 修改时间：新 → 旧
+    Modified,
+    /// 文件大小：大 → 小
+    Size,
 }
 
 #[derive(Serialize, Clone)]
@@ -374,6 +389,24 @@ fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
     natord::compare_ignore_case(a, b)
 }
 
+/// 按指定方式排序；并列时一律用名称自然序兜底，保证顺序稳定可复现
+fn sort_entries(out: &mut [ImageEntry], mode: SortMode) {
+    match mode {
+        SortMode::Name => out.sort_by(|a, b| compare_names(&a.name, &b.name)),
+        SortMode::NameDesc => out.sort_by(|a, b| compare_names(&b.name, &a.name)),
+        SortMode::Modified => out.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| compare_names(&a.name, &b.name))
+        }),
+        SortMode::Size => out.sort_by(|a, b| {
+            b.size
+                .cmp(&a.size)
+                .then_with(|| compare_names(&a.name, &b.name))
+        }),
+    }
+}
+
 /// 并行扫描的线程上限（动图探测是 IO 密集，再多也收益有限）
 const MAX_SCAN_THREADS: usize = 8;
 /// 少于该数量时串行更快（线程创建/同步开销大于收益）
@@ -400,7 +433,7 @@ fn entry_from_all(items: Vec<(PathBuf, fs::Metadata)>) -> Vec<ImageEntry> {
 }
 
 /// 同步扫描目录，返回已排序的图片列表
-fn scan_dir(dir: &str) -> std::io::Result<Vec<ImageEntry>> {
+fn scan_dir(dir: &str, sort: SortMode) -> std::io::Result<Vec<ImageEntry>> {
     let rd = fs::read_dir(long_path(dir))?;
     let base = Path::new(dir);
     let mut items: Vec<(PathBuf, fs::Metadata)> = Vec::new();
@@ -426,20 +459,32 @@ fn scan_dir(dir: &str) -> std::io::Result<Vec<ImageEntry>> {
         items.push((base.join(&name), md));
     }
     let mut out = entry_from_all(items);
-    out.sort_by(|a, b| compare_names(&a.name, &b.name));
+    sort_entries(&mut out, sort);
     Ok(out)
 }
 
-/// 列出目录中的图片（自然排序）
+/// 列出目录中的图片（默认名称自然序，可指定排序方式）
 #[tauri::command]
-pub async fn list_images(app: tauri::AppHandle, dir: String) -> Result<Vec<ImageEntry>, String> {
+pub async fn list_images(
+    app: tauri::AppHandle,
+    dir: String,
+    sort: Option<SortMode>,
+) -> Result<Vec<ImageEntry>, String> {
     let t0 = std::time::Instant::now();
     let dir = normalize_dir(&dir);
     let dir2 = dir.clone();
-    let res = run_blocking(move || scan_dir(&dir2).map_err(|e| e.to_string())).await;
+    let sort = sort.unwrap_or_default();
+    let res = run_blocking(move || scan_dir(&dir2, sort).map_err(|e| e.to_string())).await;
     match res {
         Ok(out) => {
-            diag_log(&app, &format!("LIST {dir} → {} 项 ({}ms)", out.len(), t0.elapsed().as_millis()));
+            diag_log(
+                &app,
+                &format!(
+                    "LIST {dir} [{sort:?}] → {} 项 ({}ms)",
+                    out.len(),
+                    t0.elapsed().as_millis()
+                ),
+            );
             Ok(out)
         }
         Err(e) => {
@@ -624,7 +669,7 @@ mod tests {
         fs::write(dir.join("still.gif"), gif_bytes(1, true)).unwrap();
         fs::write(dir.join("notes.txt"), b"x").unwrap(); // 非图片不入列
 
-        let out = scan_dir(&dir.to_string_lossy()).unwrap();
+        let out = scan_dir(&dir.to_string_lossy(), SortMode::Name).unwrap();
         assert_eq!(out.len(), 72);
         let pos = |n: &str| out.iter().position(|e| e.name == n).unwrap();
         assert_eq!(out[0].name, "anim.gif");
@@ -657,6 +702,51 @@ mod tests {
         // 不能动的格式直接 false，不进缓存也不读文件
         assert!(!detect_animated_cached(&f, "jpg", &md));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sort_entries_modes() {
+        let entry = |name: &str, size: u64, modified: Option<u64>| ImageEntry {
+            name: name.into(),
+            path: name.into(),
+            size,
+            modified,
+            animated: false,
+        };
+        let make = || {
+            vec![
+                entry("b10.jpg", 300, Some(30)),
+                entry("B2.jpg", 100, None),
+                entry("a1.jpg", 200, Some(10)),
+            ]
+        };
+        let names = |v: &[ImageEntry]| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+
+        let mut v = make();
+        sort_entries(&mut v, SortMode::Name);
+        assert_eq!(names(&v), vec!["a1.jpg", "B2.jpg", "b10.jpg"]);
+
+        let mut v = make();
+        sort_entries(&mut v, SortMode::NameDesc);
+        assert_eq!(names(&v), vec!["b10.jpg", "B2.jpg", "a1.jpg"]);
+
+        // 修改时间新→旧，缺失时间排最后
+        let mut v = make();
+        sort_entries(&mut v, SortMode::Modified);
+        assert_eq!(names(&v), vec!["b10.jpg", "a1.jpg", "B2.jpg"]);
+
+        // 大小大→小
+        let mut v = make();
+        sort_entries(&mut v, SortMode::Size);
+        assert_eq!(names(&v), vec!["b10.jpg", "a1.jpg", "B2.jpg"]);
+
+        // 并列时名称兜底，顺序稳定
+        let mut v = vec![
+            entry("b.jpg", 100, Some(5)),
+            entry("a.jpg", 100, Some(5)),
+        ];
+        sort_entries(&mut v, SortMode::Size);
+        assert_eq!(names(&v), vec!["a.jpg", "b.jpg"]);
     }
 
     #[test]

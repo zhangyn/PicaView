@@ -16,7 +16,13 @@ tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 # 仅在 Rust 侧使用其文件选择 API（pick_image 命令），前端不引入 JS 包、不授予 dialog:* 权限
 tauri-plugin-dialog = "2"
+# 剪贴板：复制图片（CF_DIB/CF_BITMAP）与复制文件（CF_HDROP）。
+# 默认特性 image-data 只是让 ImageData 可用，image 本来就是我们的依赖
+arboard = "3"
+# 桌面壁纸：SystemParametersInfoW
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "gif", "webp"] }
 kamadak-exif = "0.6"
 turbojpeg = { version = "1", default-features = false, features = ["cmake"] }

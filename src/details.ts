@@ -217,6 +217,9 @@ export class DetailsPanel {
       ["ICC 配置文件", im.has_icc == null ? null : im.has_icc ? "有" : "无"],
     ]);
     if (imgSec.count) frag.append(imgSec.el);
+    if (d.histogram_luma && d.histogram_luma.length === 256) {
+      frag.append(this.histogram(d.histogram_luma));
+    }
 
     const s = d.shot;
     if (s) {
@@ -260,6 +263,46 @@ export class DetailsPanel {
     }
 
     this.body.replaceChildren(frag);
+  }
+
+  /** 亮度直方图：对数刻度，避免一个尖峰把其余细节压平 */
+  private histogram(bins: number[]): HTMLElement {
+    const el = document.createElement("section");
+    el.className = "d-sec";
+    const title = document.createElement("h3");
+    title.textContent = "直方图";
+
+    const W = 236;
+    const H = 64;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const cv = document.createElement("canvas");
+    cv.className = "d-hist";
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    cv.setAttribute("role", "img");
+    cv.setAttribute("aria-label", "亮度直方图");
+
+    const ctx = cv.getContext("2d");
+    if (ctx) {
+      ctx.scale(dpr, dpr);
+      const max = Math.max(1, ...bins);
+      const norm = (v: number) => Math.log1p(v) / Math.log1p(max);
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      for (let i = 0; i < bins.length; i++) {
+        const x = (i / (bins.length - 1)) * W;
+        ctx.lineTo(x, H - norm(bins[i]) * (H - 2));
+      }
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(74, 158, 255, 0.5)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    el.append(title, cv);
+    return el;
   }
 
   private coordText(lat: number, lon: number): string {
