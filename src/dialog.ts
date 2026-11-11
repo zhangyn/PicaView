@@ -1,4 +1,5 @@
 // 通用确认/输入对话框（HTML 实现，风格统一）
+// 无障碍：role="dialog" aria-modal（见 index.html）、打开时聚焦首个控件、Tab 焦点陷阱、关闭后还原焦点
 
 export interface DialogOpts {
   message: string;
@@ -20,6 +21,8 @@ const cancelBtn = () => document.getElementById("dialog-cancel") as HTMLButtonEl
 
 let active = false;
 let resolver: ((r: DialogResult) => void) | null = null;
+/** 打开对话框前的焦点元素，关闭后还原 */
+let prevFocus: HTMLElement | null = null;
 
 export function dialogOpen(): boolean {
   return active;
@@ -29,6 +32,7 @@ export function showDialog(opts: DialogOpts): Promise<DialogResult> {
   if (active) return Promise.resolve({ ok: false });
   active = true;
   resolver = null;
+  prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
   msgEl().textContent = opts.message;
   const input = inputEl();
@@ -65,10 +69,22 @@ function finish(ok: boolean) {
   const r = { ok, value: inputEl().value };
   resolver?.(r);
   resolver = null;
+  // 还原焦点（元素已不在文档中则忽略）
+  if (prevFocus && prevFocus.isConnected) prevFocus.focus();
+  prevFocus = null;
 }
 
 function onOk() { finish(true); }
 function onCancel() { finish(false); }
+
+/** 对话框内当前可聚焦的控件（输入框隐藏时不含） */
+function focusables(): HTMLElement[] {
+  const list: HTMLElement[] = [];
+  const input = inputEl();
+  if (!input.classList.contains("hidden")) list.push(input);
+  list.push(cancelBtn(), okBtn());
+  return list;
+}
 
 okBtn().addEventListener("click", onOk);
 cancelBtn().addEventListener("click", onCancel);
@@ -79,7 +95,25 @@ backdrop().addEventListener("mousedown", (e) => {
 document.addEventListener("keydown", (e) => {
   if (!active) return;
   e.stopPropagation(); // 阻止快捷键层收到对话框中的按键
-  if (e.key === "Enter") {
+  if (e.key === "Tab") {
+    // 简单焦点陷阱：Tab 在对话框内循环
+    const items = focusables();
+    const first = items[0];
+    const last = items[items.length - 1];
+    const cur = document.activeElement;
+    if (!items.includes(cur as HTMLElement)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    } else if (e.shiftKey && cur === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && cur === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  } else if (e.key === "Enter") {
+    // 焦点在按钮上时让按钮自己响应（例如"取消"上按 Enter 不应确认）
+    if (document.activeElement instanceof HTMLButtonElement) return;
     e.preventDefault();
     onOk();
   } else if (e.key === "Escape") {

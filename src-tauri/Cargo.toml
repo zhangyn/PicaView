@@ -12,19 +12,27 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
+# 仅在 Rust 侧使用其文件选择 API（pick_image 命令），前端不引入 JS 包、不授予 dialog:* 权限
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "gif", "webp"] }
 kamadak-exif = "0.6"
 turbojpeg = { version = "1", default-features = false, features = ["cmake"] }
 trash = "5"
 natord = "1.0"
+# 仅用 Semaphore 限制缩略图并发；tauri 本身已依赖 tokio，不会引入新的编译单元
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+# 开发构建下 image 库用 -O3（具体解码器是其依赖 crate，不受此项影响）
+[profile.dev.package.image]
+opt-level = 3
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# 必须是 unwind：解码路径用 catch_unwind 捕获损坏图片导致的 panic，abort 下无效
+panic = "unwind"

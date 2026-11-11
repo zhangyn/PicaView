@@ -5,36 +5,46 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-import type { ImageEntry } from "./types";
+import type { ExifInfo, ImageEntry } from "./types";
 import { Viewer } from "./viewer";
 import { Filmstrip } from "./filmstrip";
-import { InfoBar, type ExifInfo } from "./infobar";
+import { InfoBar } from "./infobar";
 import { Slideshow } from "./slideshow";
 import { Ops } from "./ops";
 import { dialogOpen } from "./dialog";
+import { DetailsPanel } from "./details";
+import { isPicking, pickImage } from "./picker";
+import { TaskQueue } from "./queue";
 import {
-  attachIdleHider, isImageExt, isJpeg, isOpaqueExt, setTitle, toast,
+  BLOB_URL_POOL_MAX, FULL_LOAD_DEBOUNCE_MS, KEEPALIVE_MS, KEY_PAN_RATIO, KEY_ZOOM_STEP,
+  LIGHTBOX_FIT_RATIO, LIGHTBOX_HINT_MS, LOADING_DELAY_MS, PRELOAD_CONCURRENCY, PRELOAD_DELAY_MS,
+  SHOW_WINDOW_FALLBACK_MS, SLIDER_MAX_PCT, SLIDER_MIN_FIT_FACTOR, TIER_MAX, TIER_SCALE,
+  WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
+} from "./config";
+import {
+  attachIdleHider, dirname, isImageExt, isJpeg, isOpaqueExt, pathKey, peekImageSize, setTitle, toast,
 } from "./util";
 
 let entries: ImageEntry[] = [];
 let index = -1;
+/** 显示请求令牌：每次切图自增，所有 await 之后都要核对，过期即放弃 */
 let loadToken = 0;
+/** 打开请求令牌：重复 openPath 时作废旧的 */
+let openToken = 0;
+/** 目录列表是否就绪。openPath 先显示单张、列表后到，期间禁用翻页/删除/重命名 */
+let listReady = true;
 
 const viewer = new Viewer();
 const strip = new Filmstrip();
 const info = new InfoBar();
 const slideshow = new Slideshow();
+const details = new DetailsPanel();
 const ops = new Ops({
   onRotated: (path) => {
-    tiers.delete(path);
+    invalidateTier(path);
     if (entries[index] && entries[index].path === path) void showCurrent(false);
   },
-  onChanged: () => {}, // 由删除/重命名流程直接驱动
 });
-
-/** 邻图低清位图缓存（path → 适配视口的 tier） */
-const tiers = new Map<string, ImageBitmap>();
-const TIER_MAX = 6;
 
 const stage = document.getElementById("stage")!;
 const loadingEl = document.getElementById("loading")!;
@@ -43,11 +53,41 @@ const zoomEl = document.getElementById("zoom-indicator")!;
 const errorEl = document.getElementById("load-error")!;
 const errorMsgEl = document.getElementById("load-error-msg")!;
 
+// ---------- 邻图低清位图缓存（tier） ----------
+
+/** path → 适配视口的低清位图 */
+const tiers = new Map<string, ImageBitmap>();
+/** 每个 path 的版本号：旋转/重命名/删除后自增，使在途的预加载结果作废 */
+const tierVer = new Map<string, number>();
+/** 预加载并发上限（统一限流） */
+const preloadQueue = new TaskQueue(PRELOAD_CONCURRENCY);
+
+function invalidateTier(path: string) {
+  tierVer.set(path, (tierVer.get(path) ?? 0) + 1);
+  tiers.get(path)?.close();
+  tiers.delete(path);
+}
+
+function storeTier(path: string, tier: ImageBitmap) {
+  tiers.get(path)?.close();
+  tiers.delete(path);
+  while (tiers.size >= TIER_MAX) {
+    const oldest = tiers.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    tiers.get(oldest)?.close();
+    tiers.delete(oldest);
+  }
+  tiers.set(path, tier);
+}
+
 // ---------- 图片加载（Rust read_image，规避 asset 协议路径限制） ----------
 
+function readImageBuf(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_image", { path });
+}
+
 async function loadBlob(path: string): Promise<Blob> {
-  const buf = await invoke<ArrayBuffer>("read_image", { path });
-  return new Blob([buf]);
+  return new Blob([await readImageBuf(path)]);
 }
 
 /** blob URL 池：动图/兜底 img 通道使用，自动回收旧 URL */
@@ -55,8 +95,14 @@ const blobUrlPool: string[] = [];
 async function blobUrl(path: string): Promise<string> {
   const url = URL.createObjectURL(await loadBlob(path));
   blobUrlPool.push(url);
-  while (blobUrlPool.length > 3) URL.revokeObjectURL(blobUrlPool.shift()!);
+  while (blobUrlPool.length > BLOB_URL_POOL_MAX) URL.revokeObjectURL(blobUrlPool.shift()!);
   return url;
+}
+
+function releaseBlobUrl(url: string) {
+  const i = blobUrlPool.indexOf(url);
+  if (i >= 0) blobUrlPool.splice(i, 1);
+  URL.revokeObjectURL(url);
 }
 
 function showError(msg: string) {
@@ -68,55 +114,154 @@ function hideError() {
   errorEl.classList.add("hidden");
 }
 
+/** loading 指示：延迟显示，快速加载不闪烁；关闭时立即隐藏并取消计时器 */
+let loadingTimer = 0;
+function setLoading(on: boolean) {
+  if (on) {
+    if (loadingTimer || !loadingEl.classList.contains("hidden")) return;
+    loadingTimer = window.setTimeout(() => {
+      loadingTimer = 0;
+      loadingEl.classList.remove("hidden");
+    }, LOADING_DELAY_MS);
+  } else {
+    clearTimeout(loadingTimer);
+    loadingTimer = 0;
+    loadingEl.classList.add("hidden");
+  }
+}
+
+/** 诊断日志：只有出错路径（含 FAIL）才写入后端日志文件；其余仅开发模式下输出到控制台 */
 function diag(msg: string) {
-  void invoke("append_log", { msg }).catch(() => {});
+  if (msg.includes("FAIL")) {
+    void invoke("append_log", { msg }).catch(() => {});
+  } else if (import.meta.env.DEV) {
+    console.debug(`[pv] ${msg}`);
+  }
 }
 
 // ---------- 打开 ----------
 
+type ListResult = { ok: true; list: ImageEntry[] } | { ok: false };
+
+function fetchList(dir: string): Promise<ListResult> {
+  return invoke<ImageEntry[]>("list_images", { dir }).then(
+    (list): ListResult => ({ ok: true, list }),
+    (): ListResult => ({ ok: false }),
+  );
+}
+
+function findInList(list: ImageEntry[], ...paths: string[]): number {
+  const keys = paths.map(pathKey);
+  return list.findIndex((e) => keys.includes(pathKey(e.path)));
+}
+
 export async function openPath(p: string) {
   diag(`OPEN ${p}`);
-  if (!isImageExt(p)) {
-    // 目录：列出并显示第一张
-    try {
-      entries = await invoke<ImageEntry[]>("list_images", { dir: p });
-    } catch {
-      toast("无法读取该文件夹");
-      return;
-    }
-    index = entries.length ? 0 : -1;
-    afterListChange();
-    await engageLightboxForOpen();
-    void showCurrent(true);
-    return;
-  }
-  const dir = p.slice(0, Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/")));
-  if (!dir) return;
-  try {
-    entries = await invoke<ImageEntry[]>("list_images", { dir });
-  } catch {
+  const myOpen = ++openToken;
+  if (!isImageExt(p)) await openDirectory(p, myOpen);
+  else await openImage(p, myOpen);
+}
+
+/** 弹出系统"打开文件"对话框并打开所选图片；取消则无事发生 */
+async function openFileDialog() {
+  if (isPicking()) return;
+  if (slideshow.playing) slideshow.stop(); // 系统对话框期间不让幻灯片在后台继续翻页
+  const p = await pickImage();
+  if (p) void openPath(p);
+}
+
+/** 打开目录：列出并显示第一张 */
+async function openDirectory(dir: string, myOpen: number) {
+  listReady = false;
+  setLoading(true);
+  const res = await fetchList(dir);
+  if (myOpen !== openToken) return; // 已被更新的 openPath 接管
+  if (!res.ok) {
+    listReady = true;
+    setLoading(false);
     toast("无法读取该文件夹");
     return;
   }
-  const lower = p.toLowerCase();
-  index = entries.findIndex((e) => e.path.toLowerCase() === lower);
-  if (index < 0) {
-    // 列表里没有（比如扩展名大小写或刚生成），手动插入
-    const st = await statEntry(p);
-    if (st) {
-      entries.push(st);
-      entries.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
-      index = entries.findIndex((e) => e.path.toLowerCase() === lower);
+  entries = res.list;
+  index = entries.length ? 0 : -1;
+  listReady = true;
+  afterListChange();
+  await engageLightboxForOpen();
+  if (myOpen !== openToken) return;
+  void showCurrent(true);
+}
+
+/**
+ * 打开单张图片：先 stat 这一张并立即显示，同时并行取目录列表；
+ * 列表返回后以后端排序为准合并，重新定位当前索引，胶片条只重建一次。
+ */
+async function openImage(p: string, myOpen: number) {
+  const dir = dirname(p);
+  if (!dir) return;
+  listReady = false;
+  const listP = fetchList(dir);
+  const st = await statEntry(p);
+  if (myOpen !== openToken) return;
+
+  if (!st) {
+    // stat 失败（文件不存在 / 不是图片）：退回"等列表再判断"的串行流程
+    const res = await listP;
+    if (myOpen !== openToken) return;
+    listReady = true;
+    if (!res.ok) {
+      toast("无法读取该文件夹");
+      return;
     }
-  }
-  if (index < 0) {
-    toast("不是支持的图片格式");
+    const i = findInList(res.list, p);
+    if (i < 0) {
+      toast("不是支持的图片格式");
+      return;
+    }
+    entries = res.list;
+    index = i;
+    afterListChange();
+    await engageLightboxForOpen();
+    if (myOpen !== openToken) return;
+    void showCurrent(true);
     return;
   }
-  afterListChange();
+
+  // 先显示这一张；列表就绪前只有它，翻页等操作被忽略
+  entries = [st];
+  index = 0;
+  strip.rebuild([], null); // 清掉上一目录的缩略图，列表就绪后一次性重建
+  emptyEl.classList.add("hidden");
   // 灯箱样式必须在图片首次绘制之前生效，否则会先看到铺满窗口的图
   await engageLightboxForOpen();
+  if (myOpen !== openToken) return;
   void showCurrent(true);
+
+  // 合并列表
+  const res = await listP;
+  if (myOpen !== openToken) return;
+  if (!res.ok) {
+    listReady = true; // 只剩这一张，可正常操作
+    toast("无法读取该文件夹");
+    return;
+  }
+  let list = res.list;
+  let i = findInList(list, st.path, p);
+  if (i < 0) {
+    // 列表里没有（比如文件刚生成）：重新取一次后端排序结果，不在前端自己排序
+    const again = await fetchList(dir);
+    if (myOpen !== openToken) return;
+    if (again.ok) list = again.list;
+    i = findInList(list, st.path, p);
+    if (i < 0) {
+      list = [...list, st]; // 后端始终不认：追加到末尾，保证当前图仍可见
+      i = list.length - 1;
+    }
+  }
+  entries = list;
+  index = i;
+  listReady = true;
+  afterListChange();
+  info.setPosition(entries[index], index, entries.length);
 }
 
 /** 打开图片前的灯箱介入：窗口已全屏则直接挂样式，否则进全屏 */
@@ -131,7 +276,6 @@ async function engageLightboxForOpen() {
 }
 
 async function statEntry(path: string): Promise<ImageEntry | null> {
-  // 通过 list_images 的兄弟实现不可行，直接构造最小信息（从 Rust read_file_meta 拿）
   try {
     return await invoke<ImageEntry>("stat_file", { path });
   } catch {
@@ -151,82 +295,98 @@ function currentPath(): string | null {
 
 // ---------- 显示当前 ----------
 
+let fullTimer = 0;
+let preloadTimer = 0;
+let lastNavAt = 0;
+
+/** 取消尚未开始的完整图加载与预加载（切图时调用） */
+function cancelPending() {
+  clearTimeout(fullTimer);
+  clearTimeout(preloadTimer);
+  preloadQueue.clear();
+}
+
+/** 完整加载当前图（打开 / 重新加载 / 旋转后） */
 async function showCurrent(transition: boolean) {
   const entry = entries[index];
+  const token = ++loadToken;
+  cancelPending();
+  hideError();
+  details.setPath(entry ? entry.path : null);
   if (!entry) {
+    setLoading(false);
     viewer.clear();
     emptyEl.classList.remove("hidden");
     setTitle("PicaView");
     return;
   }
-  const token = ++loadToken;
-  loadingEl.classList.remove("hidden");
-  hideError();
   diag(`SHOW ${entry.name} (${entry.size}B, animated=${entry.animated})`);
   strip.setCurrent(entry.path);
   strip.ensureAround(entries, index);
   info.show(entry, index, entries.length);
   setTitle(`${entry.name} — PicaView`);
+  await loadFull(token, entry, { transition, preview: true });
+}
 
+interface FullOpts {
+  /** 与上一张交叉淡入 */
+  transition: boolean;
+  /** 先用 JPEG 内嵌 EXIF 预览快速出图 */
+  preview: boolean;
+}
+
+/** 读取并显示完整图。每个 await 之后都核对 token，过期则释放资源并放弃 */
+async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
+  setLoading(true);
   let fullDone = false;
 
   // 快速路径：EXIF 内嵌预览（仅 JPEG）
-  if (isJpeg(entry.path) && !entry.animated) {
+  if (o.preview && isJpeg(entry.path) && !entry.animated) {
     invoke<ArrayBuffer>("extract_preview", { path: entry.path })
       .then(async (buf) => {
         if (token !== loadToken || fullDone || buf.byteLength === 0) return;
-        const blob = new Blob([buf], { type: "image/jpeg" });
-        const bmp = await createImageBitmap(blob);
+        const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
         if (token !== loadToken || fullDone) {
           bmp.close();
           return;
         }
-        viewer.setBitmap(bmp, { preview: true });
+        viewer.setBitmap(bmp, {});
       })
       .catch(() => {});
   }
 
-  // 全图
   try {
     if (entry.animated) {
-      const url = await blobUrl(entry.path);
-      await viewer.showUrl(url, !isOpaqueExt(entry.path));
-      if (token !== loadToken) return;
-      fullDone = true;
-      info.updateMeta({ w: viewer.view!.iw, h: viewer.view!.ih }, null);
+      fullDone = await showViaImg(token, entry);
     } else {
       const blob = await loadBlob(entry.path);
       if (token !== loadToken) return;
-      let bmp: ImageBitmap;
+      let bmp: ImageBitmap | null = null;
       try {
         bmp = await createImageBitmap(blob);
       } catch {
-        // 位图解码失败（超大尺寸等）→ img 通道兜底，浏览器可解码任意尺寸
-        const url = await blobUrl(entry.path);
-        await viewer.showUrl(url, !isOpaqueExt(entry.path));
-        if (token !== loadToken) return;
-        fullDone = true;
-        info.updateMeta({ w: viewer.view!.iw, h: viewer.view!.ih }, null);
-        return;
+        // 位图解码失败（超大尺寸等）→ 下面走 img 通道兜底，浏览器可解码任意尺寸
       }
       if (token !== loadToken) {
-        bmp.close();
+        bmp?.close();
         return;
       }
-      fullDone = true;
-      viewer.setBitmap(bmp, {
-        alpha: !isOpaqueExt(entry.path),
-        transition,
-      });
-      info.updateMeta({ w: bmp.width, h: bmp.height }, null);
-      diag(`DECODE OK ${entry.name} ${bmp.width}x${bmp.height}`);
+      if (bmp) {
+        fullDone = true;
+        viewer.setBitmap(bmp, { alpha: !isOpaqueExt(entry.path), transition: o.transition });
+        info.updateMeta({ w: bmp.width, h: bmp.height }, null);
+        diag(`DECODE OK ${entry.name} ${bmp.width}x${bmp.height}`);
+      } else {
+        fullDone = await showViaImg(token, entry);
+      }
     }
   } catch (e) {
     diag(`LOAD FAIL ${entry.name}: ${String(e)}`);
     if (token === loadToken) showError(`无法打开「${entry.name}」：${String(e)}`);
   } finally {
-    if (token === loadToken) loadingEl.classList.add("hidden");
+    if (token === loadToken) setLoading(false);
   }
+  if (token !== loadToken) return;
 
   // EXIF 拍摄信息
   if (isJpeg(entry.path)) {
@@ -237,42 +397,106 @@ async function showCurrent(transition: boolean) {
       .catch(() => {});
   }
 
-  preloadTier(index + 1);
-  preloadTier(index - 1);
+  schedulePreload(token);
 }
 
-/** 邻图预加载：解码为视口大小 tier，内存占用极小 */
+/** tier 已显示后补全图（静默替换，不做交叉淡入，也不再取 EXIF 预览） */
+function showCurrentFullQuiet(token: number, entry: ImageEntry) {
+  return loadFull(token, entry, { transition: false, preview: false });
+}
+
+/** img 通道显示（动图 / 位图解码失败的兜底）。返回是否已显示；过期则释放 URL 且不覆盖当前画面 */
+async function showViaImg(token: number, entry: ImageEntry): Promise<boolean> {
+  const url = await blobUrl(entry.path);
+  if (token !== loadToken) {
+    releaseBlobUrl(url);
+    return false;
+  }
+  const shown = await viewer.showUrl(url, !isOpaqueExt(entry.path), () => token === loadToken);
+  if (!shown) {
+    releaseBlobUrl(url);
+    return false;
+  }
+  info.updateMeta({ w: viewer.view!.iw, h: viewer.view!.ih }, null);
+  return true;
+}
+
+/** 停止翻页（当前图加载完成）一小会儿后再预加载邻图；期间再次翻页会取消 */
+function schedulePreload(token: number) {
+  clearTimeout(preloadTimer);
+  preloadTimer = window.setTimeout(() => {
+    if (token !== loadToken) return;
+    preloadQueue.clear();
+    preloadTier(index + 1);
+    preloadTier(index - 1);
+  }, PRELOAD_DELAY_MS);
+}
+
+function isNearCurrent(path: string, radius = 2): boolean {
+  const k = entries.findIndex((e) => e.path === path);
+  return k >= 0 && Math.abs(k - index) <= radius;
+}
+
+/** 邻图预加载：解码时直接缩小到视口大小的 tier，内存占用极小；走统一并发限制 */
 function preloadTier(i: number) {
   const entry = entries[i];
   if (!entry || entry.animated || tiers.has(entry.path)) return;
   const path = entry.path;
-  loadBlob(path)
-    .then(async (blob) => {
-      const full = await createImageBitmap(blob);
-      const vw = Math.round(stage.clientWidth * viewer.dpr);
-      const scale = Math.min(1, (vw * 1.25) / full.width);
-      const tier = await createImageBitmap(full, {
-        resizeWidth: Math.max(1, Math.round(full.width * scale)),
-        resizeQuality: "high",
-      });
-      full.close();
-      if (tiers.size >= TIER_MAX) {
-        const oldest = tiers.keys().next().value as string | undefined;
-        if (oldest) {
-          tiers.get(oldest)?.close();
-          tiers.delete(oldest);
-        }
+  preloadQueue.push(path, async () => {
+    if (!isNearCurrent(path)) return; // 排队期间用户已翻远
+    const ver = tierVer.get(path) ?? 0;
+    const buf = await readImageBuf(path);
+    const target = Math.max(1, Math.round(stage.clientWidth * viewer.dpr * TIER_SCALE));
+    const opts: ImageBitmapOptions = {
+      resizeWidth: target, // 只给宽度：保持宽高比；resize 作用于 EXIF 旋转后的图
+      resizeQuality: "high",
+      imageOrientation: "from-image", // 与全图显示一致（也是默认值）
+    };
+    const dim = peekImageSize(new Uint8Array(buf));
+    let tier: ImageBitmap;
+    if (dim) {
+      // 一步到位：解码即缩小，不产生全尺寸位图。
+      // 短边已不大于目标时不缩放，避免把小图/窄长图放大成巨型位图
+      tier = Math.min(dim.w, dim.h) <= target
+        ? await createImageBitmap(new Blob([buf]), { imageOrientation: "from-image" })
+        : await createImageBitmap(new Blob([buf]), opts);
+    } else {
+      // 文件头无法识别：保守退回先解码再缩小
+      const full = await createImageBitmap(new Blob([buf]));
+      if (full.width <= target) {
+        tier = full;
+      } else {
+        tier = await createImageBitmap(full, opts);
+        full.close();
       }
-      tiers.set(path, tier);
-    })
-    .catch(() => {});
+    }
+    if (ver !== (tierVer.get(path) ?? 0) || !isNearCurrent(path)) {
+      tier.close();
+      return;
+    }
+    storeTier(path, tier);
+  });
 }
 
-/** 用 tier 立即显示，再后台补全图（翻页瞬时响应） */
-async function showFromTier(entry: ImageEntry): Promise<boolean> {
+/** 用 tier 立即显示，再后台补全图（翻页瞬时响应）。返回是否已显示 */
+async function showFromTier(token: number, entry: ImageEntry): Promise<boolean> {
   const tier = tiers.get(entry.path);
   if (!tier) return false;
-  const copy = await createImageBitmap(tier);
+  let copy: ImageBitmap;
+  try {
+    copy = await createImageBitmap(tier);
+  } catch {
+    return false;
+  }
+  if (token !== loadToken) {
+    copy.close();
+    return false;
+  }
+  // 标记为最近使用（tier 若在 await 期间已被逐出则不要复活）
+  if (tiers.get(entry.path) === tier) {
+    tiers.delete(entry.path);
+    tiers.set(entry.path, tier);
+  }
   viewer.setBitmap(copy, { alpha: !isOpaqueExt(entry.path) });
   return true;
 }
@@ -280,7 +504,7 @@ async function showFromTier(entry: ImageEntry): Promise<boolean> {
 // ---------- 翻页 ----------
 
 function nav(delta: number, wrap = false) {
-  if (!entries.length) return;
+  if (!listReady || !entries.length) return;
   let i = index + delta;
   if (i >= entries.length) {
     if (!wrap) return;
@@ -294,56 +518,39 @@ function nav(delta: number, wrap = false) {
 }
 
 function jumpTo(i: number) {
+  if (!listReady) return;
   const entry = entries[i];
   if (!entry) return;
+  hideError();
   index = i;
+  details.setPath(entry.path);
+  const token = ++loadToken;
+  cancelPending();
   strip.setCurrent(entry.path);
   info.show(entry, index, entries.length);
   setTitle(`${entry.name} — PicaView`);
   strip.ensureAround(entries, index);
-  if (entry.animated) {
-    void showCurrent(true);
-  } else {
-    // tier 快速显示 + 后台全图
-    void (async () => {
-      const token = ++loadToken;
-      const shown = await showFromTier(entry);
-      if (token === loadToken && shown) {
-        void showCurrentFullQuiet(token, entry);
-      } else {
-        void showCurrent(true);
-      }
-      preloadTier(index + 1);
-      preloadTier(index - 1);
-    })();
-  }
-}
 
-/** tier 已显示后补全图（静默替换） */
-async function showCurrentFullQuiet(token: number, entry: ImageEntry) {
-  loadingEl.classList.remove("hidden");
-  try {
-    const blob = await loadBlob(entry.path);
-    const bmp = await createImageBitmap(blob);
-    if (token !== loadToken) {
-      bmp.close();
-      return;
-    }
-    viewer.setBitmap(bmp, { alpha: !isOpaqueExt(entry.path), transition: false });
-    info.updateMeta({ w: bmp.width, h: bmp.height }, null);
-    if (isJpeg(entry.path)) {
-      invoke<ExifInfo | null>("read_exif", { path: entry.path })
-        .then((ex) => { if (token === loadToken && ex) info.updateMeta(null, ex); })
-        .catch(() => {});
-    }
-  } catch (e) {
-    if (token === loadToken) showError(`无法打开「${entry.name}」：${String(e)}`);
-  } finally {
-    if (token === loadToken) loadingEl.classList.add("hidden");
-  }
-}
+  // 连续翻页（距上次切图不足防抖时间）时，完整图延后到停止翻页再读取/解码；
+  // 单次翻页不延迟
+  const now = performance.now();
+  const rapid = now - lastNavAt < FULL_LOAD_DEBOUNCE_MS;
+  lastNavAt = now;
+  setLoading(true);
 
-// ---------- 缩放滑块 ----------
+  void (async () => {
+    // tier 快速显示，完整图随后补上
+    const shown = entry.animated ? false : await showFromTier(token, entry);
+    if (token !== loadToken) return; // 已有更新的切图请求，这次不再触发任何加载
+    const run = () => {
+      if (token !== loadToken) return;
+      if (shown) void showCurrentFullQuiet(token, entry);
+      else void loadFull(token, entry, { transition: true, preview: true });
+    };
+    if (rapid) fullTimer = window.setTimeout(run, FULL_LOAD_DEBOUNCE_MS);
+    else run();
+  })();
+}
 
 // ---------- 文件操作 ----------
 
@@ -353,34 +560,49 @@ async function doRotate(clockwise: boolean) {
 }
 
 async function doRename() {
+  if (!listReady) return;
   const entry = entries[index];
   if (!entry) return;
   const updated = await ops.rename(entry);
   if (!updated) return;
+  const i = entries.indexOf(entry); // 对话框期间（如幻灯片）当前图可能已变
+  if (i < 0) return;
   strip.rename(entry.path, updated);
-  entries[index] = updated;
-  tiers.delete(entry.path);
-  info.show(updated, index, entries.length);
-  setTitle(`${updated.name} — PicaView`);
-  void showCurrent(false);
+  entries[i] = updated;
+  invalidateTier(entry.path);
+  if (i === index) {
+    info.show(updated, index, entries.length);
+    setTitle(`${updated.name} — PicaView`);
+    void showCurrent(false);
+  }
 }
 
 async function doDelete(permanent: boolean) {
+  if (!listReady) return;
   const entry = entries[index];
   if (!entry) return;
   const ok = await ops.remove(entry, permanent);
   if (!ok) return;
-  tiers.delete(entry.path);
-  entries.splice(index, 1);
+  const i = entries.indexOf(entry);
+  if (i < 0) return; // 对话框期间列表已被替换
+  invalidateTier(entry.path);
+  strip.remove(entry.path); // 只移除节点，不重建胶片条
+  entries.splice(i, 1);
   if (!entries.length) {
     index = -1;
     afterListChange();
     void showCurrent(false);
     return;
   }
-  index = Math.min(index, entries.length - 1);
-  strip.rebuild(entries, entries[index].path);
-  void showCurrent(true);
+  if (i === index) {
+    index = Math.min(index, entries.length - 1);
+    void showCurrent(true);
+    return;
+  }
+  // 删的不是当前图：当前图不变，只修正序号
+  if (i < index) index--;
+  info.setPosition(entries[index], index, entries.length);
+  strip.ensureAround(entries, index);
 }
 
 // ---------- 缩放指示 + 滑块 ----------
@@ -392,7 +614,7 @@ let sliderDragging = false;
 /** 滑块位置 0-100 ↔ 缩放百分比（对数映射：下限=适应×0.1，上限=400%） */
 function sliderRange(): { lo: number; hi: number } {
   const fit = Math.max(viewer.fitPct(), 1);
-  return { lo: fit * 0.1, hi: Math.max(400, fit) };
+  return { lo: fit * SLIDER_MIN_FIT_FACTOR, hi: Math.max(SLIDER_MAX_PCT, fit) };
 }
 function sliderToPct(t: number): number {
   const { lo, hi } = sliderRange();
@@ -419,7 +641,7 @@ viewer.onPaint = (pct) => {
   zoomEl.textContent = label;
   zoomEl.classList.remove("hidden");
   clearTimeout(zoomTimer);
-  zoomTimer = window.setTimeout(() => zoomEl.classList.add("hidden"), 900);
+  zoomTimer = window.setTimeout(() => zoomEl.classList.add("hidden"), ZOOM_INDICATOR_MS);
   if (!sliderDragging) zoomSlider.value = String(pctToSlider(pct));
 };
 
@@ -431,7 +653,7 @@ stage.addEventListener("wheel", (e) => {
   const rect = stage.getBoundingClientRect();
   const cx = e.clientX - rect.left;
   const cy = e.clientY - rect.top;
-  const factor = Math.pow(1.2, -Math.sign(e.deltaY) * Math.min(3, Math.abs(e.deltaY) / 100));
+  const factor = Math.pow(WHEEL_ZOOM_BASE, -Math.sign(e.deltaY) * Math.min(3, Math.abs(e.deltaY) / 100));
   viewer.zoomAt(cx, cy, factor);
 }, { passive: false });
 
@@ -489,8 +711,16 @@ stage.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // ---------- 快捷键 ----------
 
+/** 焦点在可交互控件上（Enter 应交给控件本身，而不是触发全屏） */
+function isFormControl(t: EventTarget | null): boolean {
+  return t instanceof HTMLButtonElement || t instanceof HTMLInputElement ||
+    t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement ||
+    t instanceof HTMLAnchorElement;
+}
+
 window.addEventListener("keydown", (e) => {
-  if (dialogOpen()) return; // 对话框自行处理
+  // 确认对话框自行处理；系统文件选择框显示期间不响应任何快捷键
+  if (dialogOpen() || isPicking()) return;
   const meta = e.ctrlKey || e.metaKey;
 
   // 屏蔽 WebView 默认行为
@@ -499,22 +729,35 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  // Ctrl+O：打开图片（显式放行，下面的"组合键不触发单键功能"不会拦它）
+  if (meta && !e.altKey && !e.shiftKey && (e.key === "o" || e.key === "O")) {
+    e.preventDefault();
+    void openFileDialog();
+    return;
+  }
+
+  // 带 Ctrl/Alt/Meta 的组合键不触发任何单键功能；仅保留 Ctrl/Cmd + "+" "=" "-" 作为缩放
+  if (e.ctrlKey || e.altKey || e.metaKey) {
+    const zoomKey = !e.altKey && (e.key === "+" || e.key === "=" || e.key === "-");
+    if (!zoomKey) return;
+  }
+
   switch (e.key) {
     case "ArrowLeft":
       e.preventDefault();
-      if (viewer.isZoomed()) viewer.panBy(stage.clientWidth * 0.15, 0);
+      if (viewer.isZoomed()) viewer.panBy(stage.clientWidth * KEY_PAN_RATIO, 0);
       else nav(-1);
       break;
     case "ArrowRight":
       e.preventDefault();
-      if (viewer.isZoomed()) viewer.panBy(-stage.clientWidth * 0.15, 0);
+      if (viewer.isZoomed()) viewer.panBy(-stage.clientWidth * KEY_PAN_RATIO, 0);
       else nav(1);
       break;
     case "ArrowUp":
-      if (viewer.isZoomed()) { e.preventDefault(); viewer.panBy(0, stage.clientHeight * 0.15); }
+      if (viewer.isZoomed()) { e.preventDefault(); viewer.panBy(0, stage.clientHeight * KEY_PAN_RATIO); }
       break;
     case "ArrowDown":
-      if (viewer.isZoomed()) { e.preventDefault(); viewer.panBy(0, -stage.clientHeight * 0.15); }
+      if (viewer.isZoomed()) { e.preventDefault(); viewer.panBy(0, -stage.clientHeight * KEY_PAN_RATIO); }
       break;
     case "Home":
       if (entries.length) jumpTo(0);
@@ -525,11 +768,11 @@ window.addEventListener("keydown", (e) => {
     case "+":
     case "=":
       e.preventDefault();
-      viewer.zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1.25);
+      viewer.zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, KEY_ZOOM_STEP);
       break;
     case "-":
       e.preventDefault();
-      viewer.zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 0.8);
+      viewer.zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1 / KEY_ZOOM_STEP);
       break;
     case "1":
       viewer.actualSize();
@@ -539,6 +782,11 @@ window.addEventListener("keydown", (e) => {
       viewer.fit();
       break;
     case "Enter":
+      // 焦点在按钮/输入框上时，Enter 属于该控件，不触发全屏
+      if (isFormControl(e.target)) break;
+      e.preventDefault();
+      void toggleFullscreen();
+      break;
     case "F11":
       e.preventDefault();
       void toggleFullscreen();
@@ -555,6 +803,10 @@ window.addEventListener("keydown", (e) => {
     case "I":
       info.toggle();
       break;
+    case "d":
+    case "D":
+      details.toggle();
+      break;
     case "l":
     case "L":
       void doRotate(false);
@@ -569,7 +821,7 @@ window.addEventListener("keydown", (e) => {
       break;
     case "r":
     case "R":
-      if (!meta) void doRotate(true);
+      void doRotate(true);
       break;
     case "F2":
       e.preventDefault();
@@ -580,7 +832,8 @@ window.addEventListener("keydown", (e) => {
       void doDelete(e.shiftKey);
       break;
     case "Escape": {
-      // 幻灯片播放中先停止；其余任何状态 Esc = 关闭窗口
+      // 优先级：确认对话框（上面已返回）> 详情面板 > 幻灯片 > 关闭窗口
+      if (details.isOpen) { details.close(); break; }
       if (slideshow.playing) { slideshow.stop(); break; }
       void getCurrentWindow().close();
       break;
@@ -593,7 +846,6 @@ window.addEventListener("keydown", (e) => {
 const framelessBtn = document.getElementById("btn-frameless")!;
 const maskBtn = document.getElementById("btn-mask")!;
 let lightboxOn = false;
-/** 用户主动退出灯箱后，本次会话内浏览不再自动进入（打开新文件时重置） */
 
 function enterLightbox() {
   if (lightboxOn) return;
@@ -605,11 +857,11 @@ function enterLightbox() {
     maskBtn.classList.remove("active");
   }
   // Picasa 式适中展示：图片占视口约 78%，四周留出蒙板
-  viewer.fitRatio = 0.78;
+  viewer.fitRatio = LIGHTBOX_FIT_RATIO;
   viewer.fit();
   const hint = document.getElementById("lightbox-hint")!;
   hint.classList.remove("hidden");
-  setTimeout(() => hint.classList.add("hidden"), 3500);
+  setTimeout(() => hint.classList.add("hidden"), LIGHTBOX_HINT_MS);
   diag("LIGHTBOX ON");
 }
 
@@ -684,13 +936,15 @@ async function maskLightbox() {
 // ---------- 控制按钮 ----------
 
 function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
-  return `<svg viewBox="${viewBox}">${paths}</svg>`;
+  return `<svg viewBox="${viewBox}" aria-hidden="true">${paths}</svg>`;
 }
 
 (document.getElementById("btn-rot-ccw") as HTMLElement).innerHTML =
   svgIcon(`<path d="M3 8a9 9 0 1 1 2.6 8.4"/><path d="M3 3v5h5"/>`);
 (document.getElementById("btn-rot-cw") as HTMLElement).innerHTML =
   svgIcon(`<path d="M21 8a9 9 0 1 0-2.6 8.4"/><path d="M21 3v5h-5"/>`);
+(document.getElementById("btn-details") as HTMLElement).innerHTML =
+  svgIcon(`<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-5M12 7.5h.01"/>`);
 (document.getElementById("btn-slideshow") as HTMLElement).innerHTML =
   svgIcon(`<path d="M7 4.5v15l12-7.5z"/>`);
 (document.getElementById("btn-mask") as HTMLElement).innerHTML =
@@ -704,7 +958,15 @@ function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
 
 document.getElementById("btn-rot-ccw")!.addEventListener("click", () => void doRotate(false));
 document.getElementById("btn-rot-cw")!.addEventListener("click", () => void doRotate(true));
+// 详情按钮的点击由 DetailsPanel 自己绑定
 document.getElementById("btn-slideshow")!.addEventListener("click", () => slideshow.toggle());
+document.getElementById("btn-open")!.addEventListener("click", () => void openFileDialog());
+// 空状态下双击空白处 = 打开文件。#empty 盖在 #stage 之上，双击不会落到舞台的
+// "切换适应/100%"与"点图外退出灯箱"逻辑上；点在按钮上时交给按钮的 click，避免弹两次
+emptyEl.addEventListener("dblclick", (e) => {
+  if (e.target instanceof Element && e.target.closest("button")) return;
+  void openFileDialog();
+});
 document.getElementById("btn-mask")!.addEventListener("click", () => void maskLightbox());
 document.getElementById("btn-frameless")!.addEventListener("click", () => void toggleFrameless());
 document.getElementById("btn-filmstrip")!.addEventListener("click", () => strip.toggle());
@@ -714,28 +976,28 @@ document.getElementById("nav-next")!.addEventListener("click", () => nav(1));
 
 slideshow.onNext = () => nav(1, true);
 slideshow.fullscreenHandler = (on) => void applyFullscreen(on);
+slideshow.isFullscreen = () => getCurrentWindow().isFullscreen();
 
 strip.onPick = (i) => {
-  index = i;
-  void showCurrent(true);
+  // 点的就是当前图且显示正常：不重复加载（避免 tier 低清图闪一下）
+  if (i === index && viewer.view && errorEl.classList.contains("hidden")) return;
+  jumpTo(i);
 };
 
 // ---------- 显示状态防御：任何显示状态变化都强制重绘 ----------
 
 viewer.onRafSuspended = () => diag("rAF 被暂停（窗口遮挡/最小化），已同步绘制兜底");
+// 焦点/可见性变化只补绘；仅当画布实际尺寸变化时才会重新 fit，用户的缩放平移不受影响
 window.addEventListener("focus", () => viewer.resize());
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) viewer.resize();
 });
 new ResizeObserver(() => viewer.resize()).observe(stage);
 
-// 调试句柄（仅开发用）
-(window as any).__pv = { viewer, strip, info };
-
-// 帧保活：页面可见时每 1.5s 补推一帧，对抗合成器丢帧/呈现冻结
+// 帧保活：页面可见时定时静默补推一帧，对抗合成器丢帧/呈现冻结（静默：不触发缩放指示）
 setInterval(() => {
-  if (!document.hidden && viewer.view) viewer.paint();
-}, 1500);
+  if (!document.hidden && viewer.view) viewer.paint({ silent: true });
+}, KEEPALIVE_MS);
 
 // ---------- 拖拽打开 ----------
 
@@ -777,7 +1039,7 @@ function showWindowWhenReady() {
     void getCurrentWindow().show();
   };
   requestAnimationFrame(() => requestAnimationFrame(show));
-  setTimeout(show, 1200); // 兜底：隐藏窗口下 rAF 可能不跑
+  setTimeout(show, SHOW_WINDOW_FALLBACK_MS); // 兜底：隐藏窗口下 rAF 可能不跑
 }
 
 (async () => {

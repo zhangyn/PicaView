@@ -1,13 +1,7 @@
 // 左下信息浮层：文件名 / 序号 / 尺寸 / 大小 / 拍摄信息
 
 import { humanSize } from "./util";
-import type { ImageEntry } from "./types";
-
-export interface ExifInfo {
-  orientation: number;
-  date_taken: string | null;
-  camera: string | null;
-}
+import type { ExifInfo, ImageEntry } from "./types";
 
 export class InfoBar {
   private root: HTMLElement;
@@ -32,10 +26,15 @@ export class InfoBar {
 
   /** 打开文件后立即更新（尺寸信息稍后补） */
   show(entry: ImageEntry, index: number, total: number) {
-    this.nameEl.textContent = entry.name;
-    this.base = `第 ${index + 1}/${total} 张 · ${humanSize(entry.size)}`;
     this.dims = null;
     this.exif = null;
+    this.setPosition(entry, index, total);
+  }
+
+  /** 仅刷新文件名/序号/大小，保留已读到的尺寸与 EXIF（列表就绪后更新"第 n/N 张"用） */
+  setPosition(entry: ImageEntry, index: number, total: number) {
+    this.nameEl.textContent = entry.name;
+    this.base = `第 ${index + 1}/${total} 张 · ${humanSize(entry.size)}`;
     this.render();
   }
 

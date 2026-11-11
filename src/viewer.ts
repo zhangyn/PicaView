@@ -1,6 +1,10 @@
 // 渲染引擎：静图 canvas 双缓冲（交叉淡入），动图 <img> + CSS transform
 // 视图状态统一用"设备像素"表示，对外 API 用 CSS 像素
 
+import {
+  CANVAS_WILL_READ_FREQUENTLY, HQ_RESTORE_MS, RAF_SUSPEND_WARN_MS, RAF_WATCHDOG_MS,
+} from "./config";
+
 export interface Placement {
   iw: number;      // 图像宽（像素）
   ih: number;
@@ -10,13 +14,21 @@ export interface Placement {
 }
 
 export interface SetBitmapOpts {
-  preview?: boolean;    // 低清预览（后续会被全图替换）
   alpha?: boolean;      // 可能有透明区域，显示棋盘格
   transition?: boolean; // 交叉淡入
 }
 
+export interface PaintOpts {
+  /** 静默重绘：不触发 onPaint（不刷新缩放指示/滑块），用于保活与补绘 */
+  silent?: boolean;
+}
+
 const ZOOM_MIN_FACTOR = 0.05;  // 相对 fit 的最小缩放
 const ZOOM_MAX_SCALE = 64;     // 绝对最大（设备像素）
+const CANVAS_MIN_PX = 50;      // 小于该尺寸视为异常（clientWidth 为 0 时 canvas 会是 1×1）
+const MASK_FILL = "rgba(0,0,0,0.6)";
+const SHADOW_COLOR = "rgba(0,0,0,0.65)";
+const SHADOW_BLUR = 36;        // CSS 像素
 
 export class Viewer {
   private canvA: HTMLCanvasElement;
@@ -25,20 +37,25 @@ export class Viewer {
   private checker: HTMLElement;
   private active: HTMLCanvasElement;
   private rafId = 0;
+  private paintSilent = true;
 
   dpr = 1;
   view: Placement | null = null;
   private bitmap: ImageBitmap | null = null;
   animated = false;
-  private isPreview = false;
   private alpha = false;
+  /** 当前视图是否处于"适应窗口"状态（用户未手动缩放/平移） */
+  private fitted = true;
+  /** 交互中（拖动/缩放）用低质量插值，停止后补一次高质量 */
+  private interacting = false;
+  private hqTimer = 0;
   /** 蒙板：图片外区域灰色半透明 */
   maskOn = false;
   /** 灯箱模式下的适配比例：图片只占视口的一部分（Picasa 式适中展示） */
   fitRatio: number | null = null;
   private rafWatchdog = 0;
 
-  /** 每次实际绘制后回调（用于缩放指示） */
+  /** 每次实际绘制后回调（用于缩放指示）；silent 绘制不触发 */
   onPaint: ((pct: number) => void) | null = null;
   /** rAF 被系统暂停（遮挡/最小化）时回调（诊断用） */
   onRafSuspended: (() => void) | null = null;
@@ -55,38 +72,79 @@ export class Viewer {
     // GPU 上下文丢失/恢复：丢时不销毁（允许自动恢复），恢复后重绘
     for (const c of [this.canvA, this.canvB]) {
       c.addEventListener("contextlost", (e) => e.preventDefault());
-      c.addEventListener("contextrestored", () => this.paint());
+      c.addEventListener("contextrestored", () => this.paint({ silent: true }));
     }
     this.resize();
   }
 
   // ---------- 画布尺寸 ----------
 
+  /**
+   * 窗口/容器尺寸变化、获得焦点、重新可见时调用。
+   * 画布实际尺寸（含 DPR）没变：只静默补绘，不动用户的缩放平移；
+   * 变了：处于适应状态则重新 fit，否则保持视图中心点与缩放比例不变。
+   */
   resize() {
-    this.dpr = window.devicePixelRatio || 1;
+    const prev = { w: this.cw, h: this.ch, dpr: this.dpr };
+    if (!this.syncSize()) {
+      this.paint({ silent: true });
+      return;
+    }
+    this.relayout(prev);
+    this.paint();
+  }
+
+  /** 同步 canvas 像素尺寸到 CSS 尺寸 × DPR；返回是否有变化（不绘制） */
+  private syncSize(): boolean {
+    const dpr = window.devicePixelRatio || 1;
+    let changed = dpr !== this.dpr;
+    this.dpr = dpr;
     for (const c of [this.canvA, this.canvB]) {
-      const w = Math.max(1, Math.round(c.clientWidth * this.dpr));
-      const h = Math.max(1, Math.round(c.clientHeight * this.dpr));
+      const w = Math.max(1, Math.round(c.clientWidth * dpr));
+      const h = Math.max(1, Math.round(c.clientHeight * dpr));
       if (c.width !== w || c.height !== h) {
         c.width = w;
         c.height = h;
+        changed = true;
       }
     }
-    if (this.bitmap) {
-      this.fit();
-    } else if (this.animated) {
-      this.fit();
-      this.placeAnim();
+    return changed;
+  }
+
+  /** 画布尺寸变化后调整视图（不绘制） */
+  private relayout(prev: { w: number; h: number; dpr: number }) {
+    const p = this.view;
+    if (!p) return;
+    if (this.fitted) {
+      this.fitView();
+      return;
     }
+    // 用户已手动缩放：保持画面中心对应的图像点不变，缩放比例随 DPR 等比换算
+    const ix = (prev.w / 2 - p.tx) / p.scale;
+    const iy = (prev.h / 2 - p.ty) / p.scale;
+    p.scale *= this.dpr / prev.dpr;
+    p.tx = this.cw / 2 - ix * p.scale;
+    p.ty = this.ch / 2 - iy * p.scale;
   }
 
   private get cw() { return this.active.width; }
   private get ch() { return this.active.height; }
 
+  /** 适配比例（含灯箱比例，设备像素/图像像素）——fit 与过渡绘制共用 */
+  private fitScaleFor(iw: number, ih: number, cw: number, ch: number): number {
+    return Math.min(cw / iw, ch / ih) * (this.fitRatio ?? 1);
+  }
+
+  /** 适配窗口时的居中布局——fit() 与 drawFittedTo() 共用同一计算 */
+  private fitPlacement(iw: number, ih: number, cw: number, ch: number): Placement {
+    const s = this.fitScaleFor(iw, ih, cw, ch);
+    return { iw, ih, scale: s, tx: (cw - iw * s) / 2, ty: (ch - ih * s) / 2 };
+  }
+
   /** 适配窗口的缩放比（含灯箱比例，设备像素） */
   get fitScale(): number {
     if (!this.view) return 1;
-    return (Math.min(this.cw / this.view.iw, this.ch / this.view.ih)) * (this.fitRatio ?? 1);
+    return this.fitScaleFor(this.view.iw, this.view.ih, this.cw, this.ch);
   }
 
   isZoomed(): boolean {
@@ -113,7 +171,7 @@ export class Viewer {
 
   // ---------- 内容管理 ----------
 
-  /** 显示静图位图。preview 升级到全图时重算 fit */
+  /** 显示静图位图。预览升级到全图时重算 fit */
   setBitmap(bmp: ImageBitmap, opts: SetBitmapOpts) {
     this.animated = false;
     this.animImg.style.display = "none";
@@ -134,18 +192,26 @@ export class Viewer {
     }
 
     this.bitmap = bmp;
-    this.isPreview = !!opts.preview;
     // 视图状态：先置单位变换，再 fit 计算居中
     this.view = { iw: bmp.width, ih: bmp.height, scale: 1, tx: 0, ty: 0 };
     this.fit();
     old?.close();
   }
 
-  /** 用 <img> 通道显示（动图播放 / 大图位图解码失败时的兜底） */
-  async showUrl(url: string, alpha: boolean): Promise<void> {
+  /**
+   * 用 <img> 通道显示（动图播放 / 大图位图解码失败时的兜底）。
+   * isCurrent：每次 await 之后调用，返回 false 表示请求已过期——此时不触碰当前画面，返回 false。
+   */
+  async showUrl(url: string, alpha: boolean, isCurrent: () => boolean = () => true): Promise<boolean> {
+    // 先用游离的 Image 解码：过期时不会干扰正在显示的 <img>
+    const probe = new Image();
+    probe.src = url;
+    await probe.decode(); // 首帧可用
+    if (!isCurrent()) return false;
     const img = this.animImg;
     img.src = url;
-    await img.decode(); // 首帧可用
+    await img.decode(); // 同一 URL，资源已缓存
+    if (!isCurrent()) return false;
     this.bitmap?.close();
     this.bitmap = null;
     this.animated = true;
@@ -159,6 +225,7 @@ export class Viewer {
     img.style.display = "block";
     this.canvA.style.visibility = "hidden";
     this.canvB.style.visibility = "hidden";
+    return true;
   }
 
   clear() {
@@ -176,21 +243,19 @@ export class Viewer {
     this.checker.classList.remove("show");
   }
 
-  /** 当前显示的是否为低清预览 */
-  get showingPreview(): boolean {
-    return this.isPreview;
-  }
-
   // ---------- 视图操作 ----------
+
+  /** 重置为适应窗口（不绘制） */
+  private fitView() {
+    const p = this.view;
+    if (!p) return;
+    Object.assign(p, this.fitPlacement(p.iw, p.ih, this.cw, this.ch));
+    this.fitted = true;
+  }
 
   fit() {
     if (!this.view) return;
-    const p = this.view;
-    let s = Math.min(this.cw / p.iw, this.ch / p.ih);
-    if (this.fitRatio != null) s *= this.fitRatio;
-    p.scale = s;
-    p.tx = (this.cw - p.iw * s) / 2;
-    p.ty = (this.ch - p.ih * s) / 2;
+    this.fitView();
     this.paint();
   }
 
@@ -226,6 +291,8 @@ export class Viewer {
     p.tx = cxDev - (cxDev - p.tx) * f;
     p.ty = cyDev - (cyDev - p.ty) * f;
     p.scale = s2;
+    this.fitted = false;
+    this.markInteracting();
     this.paint();
   }
 
@@ -235,52 +302,71 @@ export class Viewer {
     if (!p) return;
     p.tx += dx * this.dpr;
     p.ty += dy * this.dpr;
+    this.fitted = false;
+    this.markInteracting();
     this.paint();
+  }
+
+  /** 进入交互态（低质量插值）；停止 HQ_RESTORE_MS 后静默补一次高质量 */
+  private markInteracting() {
+    this.interacting = true;
+    clearTimeout(this.hqTimer);
+    this.hqTimer = window.setTimeout(() => {
+      this.interacting = false;
+      this.paint({ silent: true });
+    }, HQ_RESTORE_MS);
   }
 
   // ---------- 绘制 ----------
 
-  paint() {
-    if (this.rafId) return;
+  paint(opts?: PaintOpts) {
+    const silent = !!opts?.silent;
+    if (this.rafId) {
+      // 已有待执行的绘制：只要有一次非静默请求，这一帧就要通知 UI
+      if (!silent) this.paintSilent = false;
+      return;
+    }
+    this.paintSilent = silent;
     const t0 = Date.now();
     const draw = () => {
-      this.rafId = 0;
+      cancelAnimationFrame(this.rafId); // 看门狗先触发时，取消仍挂着的 rAF，避免重复绘制
       clearTimeout(this.rafWatchdog);
-      if (Date.now() - t0 > 120) this.onRafSuspended?.();
-      this.drawNow();
+      this.rafId = 0;
+      if (Date.now() - t0 > RAF_SUSPEND_WARN_MS) this.onRafSuspended?.();
+      this.drawNow(this.paintSilent);
     };
     this.rafId = requestAnimationFrame(draw);
     // rAF 看门狗：窗口被遮挡/最小化时 Chromium 可能暂停 rAF，
-    // 250ms 未触发就同步绘制，保证任何状态下画面必达
-    this.rafWatchdog = window.setTimeout(draw, 250);
+    // 超时未触发就同步绘制，保证任何状态下画面必达
+    this.rafWatchdog = window.setTimeout(draw, RAF_WATCHDOG_MS);
   }
 
-  private drawNow() {
+  private drawNow(silent: boolean) {
     // 画布尺寸异常自愈（clientWidth 为 0 时 canvas 会是 1×1）
-    if (this.active.width < 50 || this.active.height < 50) {
-      this.resize();
+    if (this.active.width < CANVAS_MIN_PX || this.active.height < CANVAS_MIN_PX) {
+      const prev = { w: this.cw, h: this.ch, dpr: this.dpr };
+      if (this.syncSize()) this.relayout(prev);
     }
     if (this.animated) this.placeAnim();
     else if (this.bitmap && this.view) this.drawTo(this.active, this.bitmap, this.view);
-    this.onPaint?.(this.zoomPct());
+    if (!silent) this.onPaint?.(this.zoomPct());
   }
 
   private ctxOf(c: HTMLCanvasElement): CanvasRenderingContext2D {
-    // willReadFrequently: 强制软件光栅化——部分显卡驱动下 GPU 画布纹理无法合成（呈现为透明）
-    return c.getContext("2d", { willReadFrequently: true })!;
+    return c.getContext("2d", { willReadFrequently: CANVAS_WILL_READ_FREQUENTLY })!;
   }
 
   private drawTo(c: HTMLCanvasElement, bmp: ImageBitmap, p: Placement) {
     const ctx = this.ctxOf(c);
     ctx.clearRect(0, 0, c.width, c.height);
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+    ctx.imageSmoothingQuality = this.interacting ? "low" : "high";
     if (this.maskOn) {
       // 灯箱模式：先铺暗蒙板，再带投影绘制图片
       this.fillMask(ctx, p);
       ctx.save();
-      ctx.shadowColor = "rgba(0,0,0,0.65)";
-      ctx.shadowBlur = 36 * this.dpr;
+      ctx.shadowColor = SHADOW_COLOR;
+      ctx.shadowBlur = SHADOW_BLUR * this.dpr;
       ctx.drawImage(bmp, p.tx, p.ty, p.iw * p.scale, p.ih * p.scale);
       ctx.restore();
     } else {
@@ -296,7 +382,7 @@ export class Viewer {
     const x1 = Math.min(W, p.tx + p.iw * p.scale);
     const y1 = Math.min(H, p.ty + p.ih * p.scale);
     if (x1 <= x0 || y1 <= y0) return; // 图片完全在视口外
-    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillStyle = MASK_FILL;
     ctx.fillRect(0, 0, W, y0);                       // 上
     ctx.fillRect(0, y1, W, H - y1);                  // 下
     ctx.fillRect(0, y0, x0, y1 - y0);                // 左
@@ -314,13 +400,9 @@ export class Viewer {
     this.paint();
   }
 
+  /** 过渡用：把新位图按"适配窗口"布局画到目标画布，布局与随后的 fit() 完全一致 */
   private drawFittedTo(c: HTMLCanvasElement, bmp: ImageBitmap) {
-    const s = Math.min(c.width / bmp.width, c.height / bmp.height);
-    const p: Placement = {
-      iw: bmp.width, ih: bmp.height, scale: s,
-      tx: (c.width - bmp.width * s) / 2, ty: (c.height - bmp.height * s) / 2,
-    };
-    this.drawTo(c, bmp, p);
+    this.drawTo(c, bmp, this.fitPlacement(bmp.width, bmp.height, c.width, c.height));
   }
 
   private swap(target: HTMLCanvasElement) {

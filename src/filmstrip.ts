@@ -1,24 +1,71 @@
-// 底部缩略图胶片条：懒加载 + 磁盘缓存（Rust 侧）+ 内存位图缓存
+﻿// 底部缩略图胶片条：IntersectionObserver 懒加载 + 优先级请求队列 + 磁盘缓存（Rust 侧）
 
 import { invoke } from "@tauri-apps/api/core";
 import type { ImageEntry } from "./types";
+import { TaskQueue } from "./queue";
+import {
+  THUMB_AROUND_RADIUS, THUMB_CONCURRENCY, THUMB_H, THUMB_MAX_LOADED, THUMB_PREFETCH_MARGIN, THUMB_W,
+} from "./config";
 
-const THUMB_W = 128;
-const THUMB_H = 88;
-const MAX_CACHED = 240; // 内存位图上限
+interface ThumbNode {
+  path: string;
+  el: HTMLCanvasElement;
+  /** 在列表中的下标（删除后保持连续） */
+  idx: number;
+  /** canvas 上已画有缩略图（像素占内存，离开范围会释放） */
+  loaded: boolean;
+  removed: boolean;
+}
 
 export class Filmstrip {
   private root: HTMLElement;
   private strip: HTMLElement;
-  private canvases = new Map<string, HTMLCanvasElement>();
-  private bitmaps = new Map<string, ImageBitmap>();
-  private pending = new Set<string>();
+  private nodes: ThumbNode[] = [];
+  private byPath = new Map<string, ThumbNode>();
+  private byEl = new Map<Element, ThumbNode>();
+  /** IntersectionObserver 判定在（含预取边距的）视口内的路径 */
+  private wanted = new Set<string>();
+  /** 当前图附近、需要优先加载并保留的路径 */
+  private around = new Set<string>();
+  private curNode: ThumbNode | null = null;
+  private curIdx = 0;
+  private loadedCount = 0;
+  /** 列表代数：目录切换/重建后，旧请求的结果直接丢弃 */
+  private gen = 0;
+  private io: IntersectionObserver;
+  private queue: TaskQueue;
   visible = true;
   onPick: ((index: number) => void) | null = null;
 
   constructor() {
     this.root = document.getElementById("filmstrip")!;
     this.strip = document.getElementById("thumbs")!;
+
+    // 按"距当前图的距离"出队，距离在每次出队时实时计算
+    this.queue = new TaskQueue(THUMB_CONCURRENCY, (path) => {
+      const n = this.byPath.get(path);
+      return n ? Math.abs(n.idx - this.curIdx) : Infinity;
+    });
+
+    // root 为胶片条容器，水平方向预取约 2 屏；手动滚动同样会触发
+    this.io = new IntersectionObserver((es) => this.onIntersect(es), {
+      root: this.root,
+      rootMargin: `0px ${THUMB_PREFETCH_MARGIN} 0px ${THUMB_PREFETCH_MARGIN}`,
+    });
+
+    // 点击用事件委托：删除节点后不必重绑下标
+    this.strip.addEventListener("click", (e) => {
+      const n = this.byEl.get(e.target as Element);
+      if (n) this.onPick?.(n.idx);
+    });
+
+    // 纵向滚轮 → 横向滚动（必须非 passive 才能 preventDefault）
+    this.root.addEventListener("wheel", (e) => {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // 触摸板横滑本就能滚
+      e.preventDefault();
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? this.root.clientWidth : 1;
+      this.root.scrollLeft += e.deltaY * unit;
+    }, { passive: false });
   }
 
   toggle(): boolean {
@@ -32,62 +79,125 @@ export class Filmstrip {
     return v;
   }
 
-  /** 列表变化时重建 DOM */
+  /** 列表整体变化（打开新目录）时重建 DOM */
   rebuild(entries: ImageEntry[], currentPath: string | null) {
+    this.gen++;
+    this.io.disconnect();
+    this.queue.clear();
     this.strip.textContent = "";
-    this.canvases.clear();
-    for (const c of this.bitmaps.values()) c.close();
-    this.bitmaps.clear();
-    this.pending.clear();
+    for (const n of this.nodes) n.removed = true;
+    this.nodes = [];
+    this.byPath.clear();
+    this.byEl.clear();
+    this.wanted.clear();
+    this.around.clear();
+    this.curNode = null;
+    this.loadedCount = 0;
 
+    const frag = document.createDocumentFragment();
     entries.forEach((e, i) => {
       const cv = document.createElement("canvas");
       cv.className = "thumb";
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      cv.width = Math.round(THUMB_W * dpr);
-      cv.height = Math.round(THUMB_H * dpr);
+      // 像素尺寸在真正画入缩略图时才分配（见 draw），未加载的占位不占显存
       cv.title = e.name;
-      cv.addEventListener("click", () => this.onPick?.(i));
-      this.strip.appendChild(cv);
-      this.canvases.set(e.path, cv);
+      frag.appendChild(cv);
+      const n: ThumbNode = { path: e.path, el: cv, idx: i, loaded: false, removed: false };
+      this.nodes.push(n);
+      this.byPath.set(e.path, n);
+      this.byEl.set(cv, n);
     });
+    this.strip.appendChild(frag);
+    for (const n of this.nodes) this.io.observe(n.el);
     this.setCurrent(currentPath);
   }
 
-  /** 请求可见范围附近的缩略图 */
-  ensureAround(entries: ImageEntry[], index: number, radius = 14) {
+  /** 删除一张：只移除对应节点并更新下标，不重建 */
+  remove(path: string) {
+    const n = this.byPath.get(path);
+    if (!n) return;
+    this.io.unobserve(n.el);
+    this.queue.cancel(path);
+    n.removed = true;
+    if (n.loaded) this.loadedCount--;
+    n.loaded = false;
+    n.el.width = 0; // 释放像素
+    n.el.remove();
+    this.nodes.splice(n.idx, 1);
+    for (let i = n.idx; i < this.nodes.length; i++) this.nodes[i].idx = i;
+    this.byPath.delete(path);
+    this.byEl.delete(n.el);
+    this.wanted.delete(path);
+    this.around.delete(path);
+    if (this.curNode === n) this.curNode = null;
+  }
+
+  /** 请求当前图附近的缩略图（优先加载，并保证不被释放） */
+  ensureAround(entries: ImageEntry[], index: number, radius = THUMB_AROUND_RADIUS) {
+    this.curIdx = index;
     const lo = Math.max(0, index - radius);
     const hi = Math.min(entries.length - 1, index + radius);
-    for (let i = lo; i <= hi; i++) this.request(entries[i]);
+    const next = new Set<string>();
+    for (let i = lo; i <= hi; i++) next.add(entries[i].path);
+    // 不再属于附近范围、也不在视口内的等待请求：取消
+    for (const p of this.around) {
+      if (!next.has(p) && !this.wanted.has(p)) this.queue.cancel(p);
+    }
+    this.around = next;
+    for (const p of next) {
+      const n = this.byPath.get(p);
+      if (n) this.enqueue(n);
+    }
   }
 
-  private request(entry: ImageEntry) {
-    if (this.bitmaps.has(entry.path) || this.pending.has(entry.path)) return;
-    this.pending.add(entry.path);
-    invoke<ArrayBuffer>("thumbnail", { path: entry.path })
-      .then(async (buf) => {
-        this.pending.delete(entry.path);
-        if (buf.byteLength === 0) return;
-        const blob = new Blob([buf], { type: "image/jpeg" });
-        const bmp = await createImageBitmap(blob);
-        // 内存上限：逐出最早的
-        if (this.bitmaps.size >= MAX_CACHED) {
-          const oldest = this.bitmaps.keys().next().value as string | undefined;
-          if (oldest && !this.pending.has(oldest)) {
-            this.bitmaps.get(oldest)?.close();
-            this.bitmaps.delete(oldest);
-          }
+  private onIntersect(es: IntersectionObserverEntry[]) {
+    for (const e of es) {
+      const n = this.byEl.get(e.target);
+      if (!n || n.removed) continue;
+      if (e.isIntersecting) {
+        this.wanted.add(n.path);
+        this.enqueue(n);
+      } else {
+        this.wanted.delete(n.path);
+        if (!this.around.has(n.path)) {
+          this.queue.cancel(n.path);
+          this.maybeRelease(n);
         }
-        this.bitmaps.set(entry.path, bmp);
-        this.draw(entry.path);
-      })
-      .catch(() => this.pending.delete(entry.path));
+      }
+    }
   }
 
-  private draw(path: string) {
-    const cv = this.canvases.get(path);
-    const bmp = this.bitmaps.get(path);
-    if (!cv || !bmp) return;
+  private isWanted(n: ThumbNode): boolean {
+    return !n.removed && (this.wanted.has(n.path) || this.around.has(n.path));
+  }
+
+  private enqueue(n: ThumbNode) {
+    if (n.loaded || n.removed) return;
+    const gen = this.gen;
+    this.queue.push(n.path, () => this.fetchThumb(n, gen));
+  }
+
+  private async fetchThumb(n: ThumbNode, gen: number) {
+    // 出队时再确认一次：期间可能已离开视口/被删除/目录已切换
+    if (gen !== this.gen || !this.isWanted(n) || n.loaded) return;
+    const path = n.path;
+    const buf = await invoke<ArrayBuffer>("thumbnail", { path });
+    if (gen !== this.gen || n.path !== path || !this.isWanted(n)) return; // 过期：丢弃
+    if (buf.byteLength === 0) return;
+    const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
+    if (gen !== this.gen || n.path !== path || !this.isWanted(n)) {
+      bmp.close();
+      return;
+    }
+    this.draw(n, bmp);
+    bmp.close(); // 画布已持有像素，位图不再需要
+    this.trim();
+  }
+
+  private draw(n: ThumbNode, bmp: ImageBitmap) {
+    const cv = n.el;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(THUMB_W * dpr);
+    cv.height = Math.round(THUMB_H * dpr);
     const ctx = cv.getContext("2d")!;
     const w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
@@ -96,30 +206,62 @@ export class Filmstrip {
     const s = Math.min(w / bmp.width, h / bmp.height);
     ctx.drawImage(bmp, (w - bmp.width * s) / 2, (h - bmp.height * s) / 2,
       bmp.width * s, bmp.height * s);
+    if (!n.loaded) {
+      n.loaded = true;
+      this.loadedCount++;
+    }
   }
 
+  /** 释放远离当前图且不在视口内的缩略图像素 */
+  private maybeRelease(n: ThumbNode) {
+    if (!n.loaded) return;
+    if (Math.abs(n.idx - this.curIdx) <= THUMB_AROUND_RADIUS) return;
+    this.release(n);
+  }
+
+  private release(n: ThumbNode) {
+    n.el.width = 0; // 清空并释放画布后备存储
+    n.loaded = false;
+    this.loadedCount--;
+  }
+
+  /** 已加载数量超限时，从离当前图最远的开始释放（不动视口内/附近的） */
+  private trim() {
+    if (this.loadedCount <= THUMB_MAX_LOADED) return;
+    const cands = this.nodes
+      .filter((n) => n.loaded && !this.isWanted(n))
+      .sort((a, b) => Math.abs(b.idx - this.curIdx) - Math.abs(a.idx - this.curIdx));
+    for (const n of cands) {
+      if (this.loadedCount <= THUMB_MAX_LOADED) break;
+      this.release(n);
+    }
+  }
+
+  /** 只更新上一张与当前张的 class，不遍历全部节点 */
   setCurrent(path: string | null) {
-    for (const [p, cv] of this.canvases) {
-      cv.classList.toggle("current", p === path);
-      if (p === path) {
-        // 滚动到可见（平滑）
-        const strip = this.strip.parentElement!;
-        const left = cv.offsetLeft - strip.clientWidth / 2 + cv.offsetWidth / 2;
-        strip.scrollTo({ left, behavior: "smooth" });
-      }
-    }
+    const n = path ? this.byPath.get(path) ?? null : null;
+    if (this.curNode && this.curNode !== n) this.curNode.el.classList.remove("current");
+    this.curNode = n;
+    if (!n) return;
+    n.el.classList.add("current");
+    this.curIdx = n.idx;
+    // 滚动到可见（平滑）
+    const left = n.el.offsetLeft - this.root.clientWidth / 2 + n.el.offsetWidth / 2;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.root.scrollTo({ left, behavior: reduce ? "auto" : "smooth" });
   }
 
-  /** 重命名后：换 key 重画 */
+  /** 重命名后：换 key，保留已画好的缩略图 */
   rename(oldPath: string, entry: ImageEntry) {
-    const cv = this.canvases.get(oldPath);
-    const bmp = this.bitmaps.get(oldPath);
-    this.canvases.delete(oldPath);
-    this.bitmaps.delete(oldPath);
-    if (cv) {
-      cv.title = entry.name;
-      this.canvases.set(entry.path, cv);
-    }
-    if (bmp) this.bitmaps.set(entry.path, bmp);
+    const n = this.byPath.get(oldPath);
+    if (!n) return;
+    this.queue.cancel(oldPath);
+    this.byPath.delete(oldPath);
+    n.path = entry.path;
+    n.el.title = entry.name;
+    this.byPath.set(entry.path, n);
+    if (this.wanted.delete(oldPath)) this.wanted.add(entry.path);
+    if (this.around.delete(oldPath)) this.around.add(entry.path);
+    this.enqueue(n);
   }
 }

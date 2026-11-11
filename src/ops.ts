@@ -2,23 +2,25 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { showDialog } from "./dialog";
-import { toast } from "./util";
+import { IMAGE_EXTS, hasImageExtension, toast } from "./util";
 import type { ImageEntry } from "./types";
 
 export interface OpsCallbacks {
   /** 文件内容变化（旋转后需重新加载当前图） */
   onRotated: (path: string) => void;
-  /** 列表变化后刷新 */
-  onChanged: () => void;
 }
 
 const INVALID_CHARS = /[<>:"/\\|?*\x00-\x1f]/;
+const MAX_NAME_UTF16 = 255;
 
+/** 前置校验，文案与后端 validate_new_name 保持一致（后端仍是最终裁决） */
 function validateName(name: string): string | null {
   const n = name.trim();
   if (!n || n === "." || n === "..") return "文件名不能为空";
   if (INVALID_CHARS.test(n)) return "文件名包含非法字符";
   if (n.endsWith(".") || n.endsWith(" ")) return "文件名不能以点或空格结尾";
+  if (n.length > MAX_NAME_UTF16) return "文件名过长"; // JS 的 length 即 UTF-16 单元数
+  if (!hasImageExtension(n)) return `文件名必须保留图片扩展名（${IMAGE_EXTS.join("、")}）`;
   return null;
 }
 
@@ -61,7 +63,8 @@ export class Ops {
       toast(`已重命名为 ${newName}`);
       return { ...entry, name: newName, path: newPath };
     } catch (e) {
-      toast(`重命名失败：${String(e)}`);
+      // 后端返回的是完整的中文短句（如"同名文件已存在"），直接展示
+      toast(String(e));
       return null;
     }
   }

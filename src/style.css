@@ -128,7 +128,7 @@ html.lightbox #filmstrip {
   left: 50%;
   bottom: 96px;
   transform: translateX(-50%);
-  z-index: 3;
+  z-index: 8; /* 高于详细信息面板，复制/定位的提示不被遮住 */
   background: var(--ctrl-bg);
   border: 1px solid var(--ctrl-border);
   border-radius: 8px;
@@ -225,6 +225,18 @@ html.lightbox #filmstrip {
 .empty-icon { font-size: 56px; opacity: 0.5; }
 .empty-title { font-size: 22px; font-weight: 600; color: var(--text-dim); }
 .empty-hint { font-size: 14px; color: rgba(255, 255, 255, 0.4); }
+.empty-btn {
+  margin-top: 8px;
+  padding: 9px 26px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(74, 158, 255, 0.16);
+  color: #dbeaff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.empty-btn:hover { background: rgba(74, 158, 255, 0.3); }
 
 /* ---------- 信息浮层 ---------- */
 #infobar {
@@ -336,6 +348,14 @@ body.has-strip #controls { bottom: 124px; }
 #controls button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #controls button.active { color: var(--accent); border-color: var(--accent); }
 
+/* 窄窗口（最小宽度 640）：按钮区收紧，且允许向上换行，保证不溢出窗口 */
+#controls { max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 780px) {
+  #zoom-slider { width: 80px; }
+  #zoom-pct { min-width: 40px; }
+  #controls button { width: 36px; height: 36px; }
+}
+
 /* 左右翻页箭头 */
 .nav-arrow {
   position: absolute;
@@ -359,10 +379,135 @@ body.has-strip #controls { bottom: 124px; }
 #nav-next { right: 14px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ddd' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 5l7 7-7 7'/%3E%3C/svg%3E"); }
 body.controls-on .nav-arrow { opacity: 0.85; pointer-events: auto; }
 .nav-arrow:hover { opacity: 1 !important; }
+/* 由 div 改为 button 后的样式重置（外观不变） */
+.nav-arrow { appearance: none; -webkit-appearance: none; padding: 0; color: #ddd; }
+/* 键盘聚焦时显现，避免焦点落在看不见的按钮上 */
+.nav-arrow:focus-visible { opacity: 1; pointer-events: auto; }
 
 /* 闲置时隐藏控件 */
 body.controls-off #controls, body.controls-off .nav-arrow { opacity: 0; pointer-events: none; }
 body.controls-off { cursor: none; }
+
+/* ---------- 详细信息面板 ---------- */
+:root { --details-w: 340px; }
+
+#details-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  /* 底部留出主控制按钮（含缩放滑块）的位置，不遮挡其点击 */
+  bottom: 72px;
+  width: min(var(--details-w), calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  background: rgba(24, 24, 24, 0.92);
+  border: 1px solid var(--ctrl-border);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  z-index: 6; /* 高于胶片条/浮层(2)，低于确认对话框(100) */
+  cursor: default;
+  user-select: text;
+  -webkit-user-select: text;
+  /* 关闭态：滑出 + 淡出，结束后 visibility:hidden 使其退出 Tab 顺序与无障碍树 */
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(24px);
+  pointer-events: none;
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s linear 0.2s;
+}
+#details-panel.open {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s;
+}
+body.has-strip #details-panel { bottom: 180px; }
+
+#details-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 8px 16px;
+  border-bottom: 1px solid var(--ctrl-border);
+  user-select: none;
+  -webkit-user-select: none;
+}
+#details-title { font-size: 15px; font-weight: 600; }
+#details-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #ddd;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#details-close:hover { background: rgba(255, 255, 255, 0.12); }
+#details-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+
+#details-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+  transition: opacity 0.15s;
+}
+#details-body.stale { opacity: 0.45; }
+#details-body.stale button { pointer-events: none; }
+.d-msg { padding: 24px 0; text-align: center; font-size: 13px; color: rgba(255, 255, 255, 0.55); word-break: break-all; }
+
+.d-sec { padding-top: 12px; }
+.d-sec h3 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  margin-bottom: 4px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.d-row { display: flex; gap: 10px; padding: 3px 0; font-size: 13px; line-height: 1.45; }
+.d-row dt {
+  flex: none;
+  width: 84px;
+  color: rgba(255, 255, 255, 0.5);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.d-row dd { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.d-row dd.warn { color: #ffb454; }
+
+.d-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--ctrl-border);
+  background: #333;
+  color: #ddd;
+  font-size: 12px;
+  cursor: pointer;
+}
+.d-btn:hover:not(:disabled) { background: #3d3d3d; }
+.d-btn:disabled { opacity: 0.4; cursor: default; }
+.d-sec > .d-btn { margin-top: 6px; }
+
+#details-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--ctrl-border);
+}
+
+/* 面板打开时，让出被遮挡的右侧元素 */
+body.details-open #nav-next { right: calc(min(var(--details-w), 100vw - 24px) + 26px); }
+body.details-open #zoom-indicator { right: calc(min(var(--details-w), 100vw - 24px) + 24px); }
 
 /* ---------- 对话框 ---------- */
 #dialog-backdrop {
@@ -409,3 +554,27 @@ body.controls-off { cursor: none; }
 #dialog-btns button:hover { background: #3d3d3d; }
 #dialog-ok { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
 #dialog-ok.danger { background: #e5484d !important; border-color: #e5484d !important; }
+
+/* ---------- 键盘焦点 ---------- */
+button:focus-visible,
+#zoom-slider:focus-visible,
+#dialog-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- 减少动态效果（系统"显示动画"关闭时） ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* 加载指示仍需转动以表明进行中，但放慢 */
+  .spinner {
+    animation: spin 2.4s linear infinite !important;
+  }
+  /* 详情面板：关闭时立即隐藏，不等滑出动画 */
+  #details-panel { transition-delay: 0s !important; transform: none; }
+}

@@ -13,9 +13,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check tag matches app version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          Write-Host "tag=$tag package.json=$pkg tauri.conf.json=$conf Cargo.toml=$cargo"
+          if ($tag -ne $pkg -or $tag -ne $conf -or $tag -ne $cargo) {
+            Write-Error "Tag version does not match package.json / tauri.conf.json / Cargo.toml"
+            exit 1
+          }
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -25,7 +39,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -53,5 +67,6 @@ jobs:
             **安装**：下载下方 `PicaView_*_x64-setup.exe` 运行即可（需 WebView2，Win10/11 一般自带）。
 
             **支持格式**：JPEG · PNG · BMP · GIF · WebP · APNG
-          releaseDraft: false
+          # 先发草稿，验证安装包后再手动发布
+          releaseDraft: true
           prerelease: false
