@@ -229,8 +229,8 @@ fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), St
     replace_file(p, &out)
 }
 
-/// 读取 PNG 内嵌的 ICC 配置文件（没有则 None）
-fn png_icc_profile(p: &Path) -> Option<Vec<u8>> {
+/// 读取 PNG 内嵌的 ICC 配置文件（没有则 None）。旋转与导出共用
+pub(crate) fn png_icc_profile(p: &Path) -> Option<Vec<u8>> {
     use image::ImageDecoder as _;
     let f = std::fs::File::open(p).ok()?;
     let mut dec = image::codecs::png::PngDecoder::new(std::io::BufReader::new(f)).ok()?;

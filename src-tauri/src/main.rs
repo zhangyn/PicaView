@@ -4,6 +4,7 @@
 mod actions;
 mod details;
 mod exifinfo;
+mod export;
 mod imgscan;
 mod ops;
 mod rotate;
@@ -94,6 +95,8 @@ fn main() {
             actions::copy_image,
             actions::copy_files,
             actions::set_wallpaper,
+            export::export_image,
+            export::pick_save_path,
             settings::get_settings,
             settings::set_settings,
             cli_args,

@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { SETTINGS_SAVE_DEBOUNCE_MS } from "./config";
 
 export type SortMode = "name" | "name_desc" | "modified" | "size";
+export type Theme = "dark" | "light" | "system";
 
 export interface Settings {
   /** 打开图片即进入全屏灯箱 */
@@ -17,6 +18,8 @@ export interface Settings {
   infobar: boolean;
   /** 目录排序方式 */
   sort: SortMode;
+  /** 界面主题 */
+  theme: Theme;
 }
 
 export const SORT_LABELS: Record<SortMode, string> = {
@@ -26,7 +29,13 @@ export const SORT_LABELS: Record<SortMode, string> = {
   size: "文件大小",
 };
 
-const DEFAULTS: Settings = { lightbox: true, filmstrip: true, infobar: true, sort: "name" };
+const DEFAULTS: Settings = {
+  lightbox: true,
+  filmstrip: true,
+  infobar: true,
+  sort: "name",
+  theme: "dark",
+};
 
 let current: Settings = { ...DEFAULTS };
 let saveTimer = 0;

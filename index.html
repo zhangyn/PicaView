@@ -71,7 +71,10 @@
     <div id="more-menu" class="hidden" role="menu" aria-label="更多操作">
       <button type="button" role="menuitem" data-act="copy-image">复制图片<kbd>Ctrl+C</kbd></button>
       <button type="button" role="menuitem" data-act="copy-file">复制文件<kbd>Ctrl+Shift+C</kbd></button>
+      <button type="button" role="menuitem" data-act="export">另存为 / 导出…<kbd>Ctrl+E</kbd></button>
       <button type="button" role="menuitem" data-act="wallpaper">设为桌面壁纸</button>
+      <div class="menu-sep" role="separator"></div>
+      <button type="button" role="menuitem" data-act="settings">设置…</button>
     </div>
 
     <!-- 取色探针（C 键开关） -->
@@ -97,6 +100,88 @@
         <button type="button" id="details-reveal" class="d-btn" aria-label="在资源管理器中显示">在资源管理器中显示</button>
       </div>
     </aside>
+
+    <!-- 导出 / 另存为 -->
+    <div id="export-backdrop" class="modal-backdrop hidden">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
+        <h2 id="export-title" class="modal-title">另存为 / 导出</h2>
+        <div class="modal-rows">
+          <label class="modal-row">
+            <span>格式</span>
+            <select id="export-format">
+              <option value="keep">保持原格式</option>
+              <option value="jpeg">JPEG</option>
+              <option value="png">PNG</option>
+              <option value="webp">WebP（无损）</option>
+            </select>
+          </label>
+          <label class="modal-row">
+            <span>长边上限</span>
+            <input id="export-max" type="number" min="64" max="30000" step="1" placeholder="留空 = 原尺寸" />
+            <span class="modal-unit">px</span>
+          </label>
+          <label class="modal-row" id="export-quality-row">
+            <span>JPEG 质量</span>
+            <input id="export-quality" type="range" min="1" max="100" value="92" />
+            <output id="export-quality-val">92</output>
+          </label>
+          <div class="modal-row">
+            <span>保存到</span>
+            <div class="modal-path">
+              <button type="button" id="export-pick" class="d-btn">选择…</button>
+              <span id="export-dest" class="modal-path-text"></span>
+            </div>
+          </div>
+          <p id="export-note" class="modal-hint"></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="export-cancel" class="d-btn">取消</button>
+          <button type="button" id="export-ok" class="modal-primary">导出</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置 -->
+    <div id="settings-backdrop" class="modal-backdrop hidden">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <h2 id="settings-title" class="modal-title">设置</h2>
+        <div class="modal-rows">
+          <label class="modal-row">
+            <span>打开即灯箱</span>
+            <input id="set-lightbox" type="checkbox" />
+          </label>
+          <label class="modal-row">
+            <span>胶片条</span>
+            <input id="set-filmstrip" type="checkbox" />
+          </label>
+          <label class="modal-row">
+            <span>信息浮层</span>
+            <input id="set-infobar" type="checkbox" />
+          </label>
+          <label class="modal-row">
+            <span>排序方式</span>
+            <select id="set-sort">
+              <option value="name">名称 ↑</option>
+              <option value="name_desc">名称 ↓</option>
+              <option value="modified">修改时间</option>
+              <option value="size">文件大小</option>
+            </select>
+          </label>
+          <label class="modal-row">
+            <span>主题</span>
+            <select id="set-theme">
+              <option value="dark">深色</option>
+              <option value="light">浅色</option>
+              <option value="system">跟随系统</option>
+            </select>
+          </label>
+        </div>
+        <p id="settings-hint" class="modal-hint"></p>
+        <div class="modal-actions">
+          <button type="button" id="settings-close" class="modal-primary">完成</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 通用确认对话框 -->
     <div id="dialog-backdrop" class="hidden">

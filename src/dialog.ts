@@ -28,6 +28,23 @@ export function dialogOpen(): boolean {
   return active;
 }
 
+// ---------- 其他模态（导出/设置）与确认框的互斥 ----------
+
+let modalCount = 0;
+
+export function modalBegin() {
+  modalCount++;
+}
+
+export function modalEnd() {
+  modalCount = Math.max(0, modalCount - 1);
+}
+
+/** 任何模态打开时，全局快捷键都应让位 */
+export function modalOpen(): boolean {
+  return active || modalCount > 0;
+}
+
 export function showDialog(opts: DialogOpts): Promise<DialogResult> {
   if (active) return Promise.resolve({ ok: false });
   active = true;

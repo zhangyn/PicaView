@@ -43,6 +43,19 @@ export function normalizeWheelDelta(e: WheelEvent, cap = WHEEL_DELTA_CAP): numbe
   return Math.max(-cap, Math.min(cap, d));
 }
 
+/** 文件名（不含目录），兼容 "\\" 与 "/" */
+export function baseName(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
+/** 文件名去掉扩展名（".jpg" 这种只算扩展名的不动） */
+export function stemOf(p: string): string {
+  const name = baseName(p);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
 export function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

@@ -9,6 +9,17 @@ use std::path::PathBuf;
 
 use crate::imgscan::SortMode;
 
+/// 界面主题
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+    /// 跟随系统（前端用 prefers-color-scheme 判断）
+    System,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -20,6 +31,8 @@ pub struct Settings {
     pub infobar: bool,
     /// 目录排序方式
     pub sort: SortMode,
+    /// 界面主题（同时影响窗口标题栏）
+    pub theme: Theme,
 }
 
 impl Default for Settings {
@@ -29,6 +42,7 @@ impl Default for Settings {
             filmstrip: true,
             infobar: true,
             sort: SortMode::Name,
+            theme: Theme::Dark,
         }
     }
 }
@@ -106,6 +120,7 @@ mod tests {
             filmstrip: false,
             infobar: false,
             sort: SortMode::Modified,
+            theme: Theme::Light,
         };
         assert_eq!(Settings::from_json(&s.to_json()), s);
     }
@@ -117,6 +132,7 @@ mod tests {
         assert!(s.lightbox, "缺失字段应取默认值");
         assert!(s.infobar);
         assert_eq!(s.sort, SortMode::Name);
+        assert_eq!(s.theme, Theme::Dark);
     }
 
     #[test]
@@ -143,5 +159,7 @@ mod tests {
             "\"modified\""
         );
         assert_eq!(serde_json::to_string(&SortMode::Size).unwrap(), "\"size\"");
+        assert_eq!(serde_json::to_string(&Theme::System).unwrap(), "\"system\"");
+        assert_eq!(serde_json::to_string(&Theme::Light).unwrap(), "\"light\"");
     }
 }

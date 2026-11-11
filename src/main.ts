@@ -11,7 +11,10 @@ import { Filmstrip } from "./filmstrip";
 import { InfoBar } from "./infobar";
 import { Slideshow } from "./slideshow";
 import { Ops } from "./ops";
-import { dialogOpen } from "./dialog";
+import { modalOpen } from "./dialog";
+import { Exporter } from "./exporter";
+import { SettingsPanel } from "./settingspanel";
+import { applyTheme, watchSystemTheme } from "./theme";
 import { DetailsPanel } from "./details";
 import { isPicking, pickImage } from "./picker";
 import { PixelProbe } from "./probe";
@@ -888,8 +891,8 @@ function isFormControl(t: EventTarget | null): boolean {
 }
 
 window.addEventListener("keydown", (e) => {
-  // 确认对话框自行处理；系统文件选择框显示期间不响应任何快捷键
-  if (dialogOpen() || isPicking()) return;
+  // 确认对话框/导出/设置面板自行处理；系统文件选择框显示期间不响应任何快捷键
+  if (modalOpen() || isPicking()) return;
   const meta = e.ctrlKey || e.metaKey;
 
   // 屏蔽 WebView 默认行为
@@ -914,6 +917,13 @@ window.addEventListener("keydown", (e) => {
       return;
     }
     void (e.shiftKey ? copyFiles([p]) : copyImage(p));
+    return;
+  }
+
+  // Ctrl+E：另存为 / 导出
+  if (meta && !e.altKey && !e.shiftKey && (e.key === "e" || e.key === "E")) {
+    e.preventDefault();
+    exporter.open();
     return;
   }
 
@@ -1180,14 +1190,40 @@ slideshow.onNext = () => nav(1, true);
 slideshow.fullscreenHandler = (on) => void applyFullscreen(on);
 slideshow.isFullscreen = () => getCurrentWindow().isFullscreen();
 
+const settingsPanel = new SettingsPanel({
+  setFilmstrip: (v) => strip.setVisible(v),
+  setInfo: (v) => info.setVisible(v),
+  setSort: (s) => {
+    sortSelect.value = s;
+    void reloadList();
+  },
+  setTheme: (theme) => applyTheme(theme),
+});
+
+const exporter = new Exporter(() => {
+  const entry = entries[index];
+  return entry ? { path: entry.path, animated: entry.animated } : null;
+});
+
 sortSelect.addEventListener("change", () => {
   updateSettings({ sort: sortSelect.value as SortMode });
   void reloadList();
 });
 
 new MoreMenu(moreBtn, moreMenuEl, currentPath, (act: MenuAction) => {
+  if (act === "export") {
+    exporter.open();
+    return;
+  }
+  if (act === "settings") {
+    settingsPanel.open();
+    return;
+  }
   const p = currentPath();
-  if (!p) return;
+  if (!p) {
+    toast("没有打开的图片");
+    return;
+  }
   if (act === "copy-image") void copyImage(p);
   else if (act === "copy-file") void copyFiles([p]);
   else void setWallpaper(p);
@@ -1258,6 +1294,8 @@ function showWindowWhenReady() {
 (async () => {
   // 先读设置：窗口是"隐藏创建 + 就绪后显示"，所以一切偏好在首帧之前生效
   const s = await loadSettings();
+  applyTheme(s.theme);
+  watchSystemTheme();
   sortSelect.value = s.sort;
   strip.setVisible(s.filmstrip);
   info.setVisible(s.infobar);

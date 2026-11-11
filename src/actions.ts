@@ -45,7 +45,7 @@ export async function setWallpaper(path: string): Promise<boolean> {
   }
 }
 
-export type MenuAction = "copy-image" | "copy-file" | "wallpaper";
+export type MenuAction = "copy-image" | "copy-file" | "export" | "wallpaper" | "settings";
 
 /** 下拉菜单：按钮展开、点外面/Esc/选中后关闭，焦点回到按钮 */
 export class MoreMenu {
@@ -100,15 +100,19 @@ export class MoreMenu {
 
   show() {
     if (this.open) return;
-    if (!this.getPath()) {
-      toast("没有打开的图片");
-      return;
+    // 没有图片时"设置"仍然可用，图片相关的项置灰
+    const has = !!this.getPath();
+    for (const el of this.root.querySelectorAll<HTMLButtonElement>("[data-act]")) {
+      const act = el.dataset.act;
+      if (act === "settings") continue;
+      el.disabled = !has;
     }
     this.open = true;
     this.root.classList.remove("hidden");
     this.btn.classList.add("active");
     this.btn.setAttribute("aria-expanded", "true");
-    (this.root.querySelector("[role=menuitem]") as HTMLElement | null)?.focus();
+    const first = this.root.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)");
+    first?.focus();
   }
 
   close() {
