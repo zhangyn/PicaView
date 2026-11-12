@@ -1155,7 +1155,6 @@ window.addEventListener("keydown", (e) => {
 
 // ---------- 全屏（灯箱模式：窗口透明，压暗桌面，图片悬浮居中） ----------
 
-const framelessBtn = document.getElementById("btn-frameless")!;
 const maskBtn = document.getElementById("btn-mask")!;
 let lightboxOn = false;
 
@@ -1221,7 +1220,6 @@ async function applyFrameless(on: boolean) {
     await getCurrentWindow().setDecorations(!on);
   } catch { /* 非 Tauri 环境 */ }
   document.body.classList.toggle("frameless", on);
-  framelessBtn.classList.toggle("active", on);
 }
 
 async function toggleFrameless() {
@@ -1280,8 +1278,6 @@ function svgIcon(paths: string, viewBox = "0 0 24 24"): string {
   svgIcon(`<path d="M7 4.5v15l12-7.5z"/>`);
 (document.getElementById("btn-mask") as HTMLElement).innerHTML =
   svgIcon(`<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4.5" fill="currentColor" stroke="none" opacity="0.85"/>`);
-(document.getElementById("btn-frameless") as HTMLElement).innerHTML =
-  svgIcon(`<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9.5h18" stroke-dasharray="2.5 2.5"/>`);
 (document.getElementById("btn-filmstrip") as HTMLElement).innerHTML =
   svgIcon(`<rect x="2.5" y="7" width="19" height="10" rx="1.5"/><path d="M6.5 7v10M11 7v10M15.5 7v10M19.5 7v10M2.5 12h19" stroke-width="1.2"/>`);
 (document.getElementById("btn-fullscreen") as HTMLElement).innerHTML =
@@ -1301,7 +1297,6 @@ emptyEl.addEventListener("dblclick", (e) => {
   void openFileDialog();
 });
 document.getElementById("btn-mask")!.addEventListener("click", () => toggleMask());
-document.getElementById("btn-frameless")!.addEventListener("click", () => void toggleFrameless());
 document.getElementById("btn-filmstrip")!.addEventListener("click", () => toggleFilmstrip());
 document.getElementById("btn-fullscreen")!.addEventListener("click", () => void toggleFullscreen());
 document.getElementById("nav-prev")!.addEventListener("click", () => nav(-1));
