@@ -19,6 +19,7 @@ import { DetailsPanel } from "./details";
 import { isPicking, pickImage } from "./picker";
 import { PixelProbe } from "./probe";
 import { TaskQueue } from "./queue";
+import { applyQuarter, clearQuarter, quarterOf, rekeyQuarter, setQuarter } from "./rotation";
 import { getSettings, loadSettings, updateSettings, type SortMode } from "./settings";
 import { MoreMenu, copyFiles, copyImage, setWallpaper, type MenuAction } from "./actions";
 import {
@@ -143,7 +144,13 @@ function maybeUpgradeLod() {
   lodBusy = true;
   void (async () => {
     try {
-      const bmp = await createImageBitmap(new Blob([await readImageBuf(path)]));
+      let bmp = await createImageBitmap(new Blob([await readImageBuf(path)]));
+      if (token !== loadToken) {
+        bmp.close();
+        return;
+      }
+      const quarter = currentQuarter(entry);
+      if (quarter) bmp = await applyQuarter(bmp, quarter);
       if (token !== loadToken) {
         bmp.close();
         return;
@@ -489,6 +496,7 @@ async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
       exifInfo = await exifP;
       if (token !== loadToken) return;
       const plan = lodPlan(buf, exifInfo?.orientation ?? 1);
+      const quarter = currentQuarter(entry);
       let bmp: ImageBitmap | null = null;
       try {
         bmp = await createImageBitmap(new Blob([buf]), plan.opts);
@@ -500,18 +508,29 @@ async function loadFull(token: number, entry: ImageEntry, o: FullOpts) {
         return;
       }
       if (bmp) {
+        // "仅显示"模式：方向只在解码结果上转，文件一个字节都不动
+        if (quarter) bmp = await applyQuarter(bmp, quarter);
+        if (token !== loadToken) {
+          bmp.close();
+          return;
+        }
         fullDone = true;
         viewer.setBitmap(bmp, {
           alpha: !isOpaqueExt(entry.path),
           transition: o.transition,
           keepView: o.keepView,
-          srcWidth: plan.dims?.w,
+          // 转 90°/270° 时显示宽高互换，LOD 的源像素比要按旋转后的宽度算
+          srcWidth: plan.dims ? (quarter % 2 ? plan.dims.h : plan.dims.w) : undefined,
         });
-        // 尺寸用源图的真实显示尺寸，而不是降采样后的位图尺寸
+        // 尺寸用源图的真实尺寸，而不是降采样后的位图尺寸
         info.updateMeta(plan.dims ?? { w: bmp.width, h: bmp.height }, null);
         lodPath = plan.opts ? entry.path : null;
-        diag(`DECODE OK ${entry.name} ${bmp.width}x${bmp.height}${plan.opts ? " (lod)" : ""}`);
+        diag(
+          `DECODE OK ${entry.name} ${bmp.width}x${bmp.height}` +
+            `${plan.opts ? " (lod)" : ""}${quarter ? ` rot${quarter * 90}` : ""}`,
+        );
       } else {
+        if (quarter) toast("该图过大，暂无法在旋转状态下显示");
         fullDone = await showViaImg(token, entry);
       }
     }
@@ -624,12 +643,18 @@ async function showFromTier(token: number, entry: ImageEntry): Promise<boolean> 
     copy.close();
     return false;
   }
+  // tier 缓存里存的是原始方向，显示时再按"仅显示"的角度旋转
+  const shown = await applyQuarter(copy, currentQuarter(entry));
+  if (token !== loadToken) {
+    shown.close();
+    return false;
+  }
   // 标记为最近使用（tier 若在 await 期间已被逐出则不要复活）
   if (tiers.get(entry.path) === tier) {
     tiers.delete(entry.path);
     tiers.set(entry.path, tier);
   }
-  viewer.setBitmap(copy, { alpha: !isOpaqueExt(entry.path) });
+  viewer.setBitmap(shown, { alpha: !isOpaqueExt(entry.path) });
   return true;
 }
 
@@ -687,20 +712,79 @@ function jumpTo(i: number) {
 
 // ---------- 文件操作 ----------
 
+/** 当前图的显示旋转（顺时针 90° 次数 0..3） */
+function currentQuarter(entry?: ImageEntry | null): number {
+  const e = entry ?? entries[index];
+  return e ? quarterOf(e.path, e.size, e.modified ?? 0) : 0;
+}
+
 async function doRotate(clockwise: boolean) {
   const entry = entries[index];
   if (!entry) return;
-  if (await ops.rotate(entry, clockwise)) pushRotateUndo(entry.path, clockwise);
+  // 默认只旋转显示；设置里改成"写入文件"才改写图片
+  if (getSettings().rotate_mode === "file") await rotateToFile(entry, clockwise);
+  else rotateView(entry, clockwise);
+}
+
+/** 仅显示：只改方向记录，不碰文件（重新解码一次以应用新方向） */
+function rotateView(entry: ImageEntry, clockwise: boolean) {
+  if (entry.animated) {
+    toast("动图暂不支持旋转");
+    return;
+  }
+  const mtime = entry.modified ?? 0;
+  const prev = quarterOf(entry.path, entry.size, mtime);
+  setQuarter(entry.path, entry.size, mtime, (prev + (clockwise ? 1 : 3)) % 4);
+  pushRotateUndo({ path: entry.path, mode: "view", prev, quarters: 1 });
+  strip.invalidate(entry.path); // 缩略图跟着转
+  void showCurrent(false);
+}
+
+/** 写入文件：把攒下的显示方向一起落地，再清掉记录 */
+async function rotateToFile(entry: ImageEntry, clockwise: boolean) {
+  if (entry.animated) {
+    toast("动图暂不支持旋转");
+    return;
+  }
+  const mtime = entry.modified ?? 0;
+  const prev = quarterOf(entry.path, entry.size, mtime);
+  const total = (prev + (clockwise ? 1 : 3)) % 4;
+  if (total === 0) {
+    // 转回正方向：文件本来就正，只需清掉显示记录
+    setQuarter(entry.path, entry.size, mtime, 0);
+    strip.invalidate(entry.path);
+    void showCurrent(false);
+    return;
+  }
+  // 先清掉显示方向：写文件成功后 onRotated 会立刻重载，
+  // 若记录还在就会被再叠一次（画面转两圈）
+  if (prev) setQuarter(entry.path, entry.size, mtime, 0);
+  // total 个顺时针 = 1~2 档正向，或 1 档反向（等价且省事）
+  const steps = total === 3 ? 1 : total;
+  if (!(await ops.rotate(entry, total !== 3, steps))) {
+    if (prev) setQuarter(entry.path, entry.size, mtime, prev); // 失败，恢复记录
+    return;
+  }
+  pushRotateUndo({ path: entry.path, mode: "file", prev, quarters: total });
 }
 
 // ---------- 旋转撤销（Ctrl+Z） ----------
 
-/** 已成功的旋转（路径 + 方向），Ctrl+Z 做反向旋转即可回到原样 */
-const rotateUndo: { path: string; clockwise: boolean }[] = [];
+/** 撤销记录：显示模式只需恢复原角度，文件模式要反向转回去 */
+interface RotateUndo {
+  path: string;
+  mode: "view" | "file";
+  /** 旋转前挂起的显示角度 */
+  prev: number;
+  /** 文件模式实际写入的顺时针 90° 次数 */
+  quarters: number;
+}
 
-function pushRotateUndo(path: string, clockwise: boolean) {
-  rotateUndo.push({ path, clockwise });
-  if (rotateUndo.length > ROTATE_UNDO_MAX) rotateUndo.shift();
+const rotateUndo: RotateUndo[] = [];
+
+function pushRotateUndo(rec: RotateUndo) {
+  rotateUndo.push(rec);
+  while (rotateUndo.length > ROTATE_UNDO_MAX) rotateUndo.shift();
 }
 
 async function undoRotate() {
@@ -709,8 +793,31 @@ async function undoRotate() {
     toast("没有可撤销的旋转");
     return;
   }
+  const entry = entries.find((e) => pathKey(e.path) === pathKey(last.path)) ?? null;
+
+  if (last.mode === "view") {
+    if (!entry) {
+      toast("该图片已不在列表中");
+      return;
+    }
+    setQuarter(entry.path, entry.size, entry.modified ?? 0, last.prev);
+    strip.invalidate(entry.path);
+    toast("已撤销上一次旋转");
+    if (pathKey(entries[index]?.path ?? "") === pathKey(entry.path)) void showCurrent(false);
+    return;
+  }
+
   try {
-    await invoke("rotate", { path: last.path, clockwise: !last.clockwise });
+    // 反向：quarters 个顺时针 → quarters 个逆时针（3 档等价 1 档顺时针）
+    const steps = last.quarters === 3 ? 1 : last.quarters;
+    if (steps > 0) {
+      await invoke("rotate", {
+        path: last.path,
+        clockwise: last.quarters === 3,
+        quarters: steps,
+      });
+    }
+    if (entry && last.prev) setQuarter(entry.path, entry.size, entry.modified ?? 0, last.prev);
     toast("已撤销上一次旋转");
     invalidateTier(last.path);
     strip.invalidate(last.path);
@@ -732,6 +839,7 @@ async function doRename() {
   if (i < 0) return;
   strip.rename(entry.path, updated);
   entries[i] = updated;
+  rekeyQuarter(entry.path, updated.path); // 内容没变，方向跟着走
   invalidateTier(entry.path);
   if (i === index) {
     info.show(updated, index, entries.length);
@@ -749,6 +857,7 @@ async function doDelete(permanent: boolean) {
   const i = entries.indexOf(entry);
   if (i < 0) return; // 对话框期间列表已被替换
   invalidateTier(entry.path);
+  clearQuarter(entry.path);
   strip.remove(entry.path); // 只移除节点，不重建胶片条
   entries.splice(i, 1);
   if (!entries.length) {
@@ -916,7 +1025,7 @@ window.addEventListener("keydown", (e) => {
       toast("没有打开的图片");
       return;
     }
-    void (e.shiftKey ? copyFiles([p]) : copyImage(p));
+    void (e.shiftKey ? copyFiles([p]) : copyImage(p, currentQuarter()));
     return;
   }
 
@@ -1106,14 +1215,26 @@ function isOutsideImage(cx: number, cy: number): boolean {
 
 // ---------- 只看图片模式（无边框） ----------
 
+/** 应用无边框状态（启动时按设置恢复，也供开关复用） */
+async function applyFrameless(on: boolean) {
+  try {
+    await getCurrentWindow().setDecorations(!on);
+  } catch { /* 非 Tauri 环境 */ }
+  document.body.classList.toggle("frameless", on);
+  framelessBtn.classList.toggle("active", on);
+}
+
 async function toggleFrameless() {
   const w = getCurrentWindow();
-  const oldDecorated = await w.isDecorated();
-  const newDecorated = !oldDecorated;
-  await w.setDecorations(newDecorated);
-  const framelessNow = !newDecorated;
-  document.body.classList.toggle("frameless", framelessNow);
-  framelessBtn.classList.toggle("active", framelessNow);
+  // 以窗口实际状态为准（避免与设置里存的旧值打架）
+  let framelessNow: boolean;
+  try {
+    framelessNow = await w.isDecorated();
+  } catch {
+    framelessNow = !document.body.classList.contains("frameless");
+  }
+  await applyFrameless(framelessNow);
+  updateSettings({ frameless: framelessNow });
   if (framelessNow) {
     toast("只看图片模式：右键拖动移动窗口，Esc 退出软件");
   }
@@ -1198,11 +1319,14 @@ const settingsPanel = new SettingsPanel({
     void reloadList();
   },
   setTheme: (theme) => applyTheme(theme),
+  // 只影响下一次旋转；已经攒下的显示方向会在"写入文件"模式下随下一次旋转一起落地
+  setRotateMode: () => {},
+  setFrameless: (on) => void applyFrameless(on),
 });
 
 const exporter = new Exporter(() => {
   const entry = entries[index];
-  return entry ? { path: entry.path, animated: entry.animated } : null;
+  return entry ? { path: entry.path, animated: entry.animated, quarter: currentQuarter(entry) } : null;
 });
 
 sortSelect.addEventListener("change", () => {
@@ -1224,9 +1348,9 @@ new MoreMenu(moreBtn, moreMenuEl, currentPath, (act: MenuAction) => {
     toast("没有打开的图片");
     return;
   }
-  if (act === "copy-image") void copyImage(p);
+  if (act === "copy-image") void copyImage(p, currentQuarter());
   else if (act === "copy-file") void copyFiles([p]);
-  else void setWallpaper(p);
+  else void setWallpaper(p, currentQuarter());
 });
 
 strip.onPick = (i) => {
@@ -1297,6 +1421,8 @@ function showWindowWhenReady() {
   applyTheme(s.theme);
   watchSystemTheme();
   sortSelect.value = s.sort;
+  // 偏好都在窗口显示之前生效：无边框 + 胶片条/浮层
+  if (s.frameless) await applyFrameless(true);
   strip.setVisible(s.filmstrip);
   info.setVisible(s.infobar);
   if (!s.lightbox) {

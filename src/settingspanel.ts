@@ -3,22 +3,26 @@
 // 除"打开即灯箱"（下次打开图片才生效）外，改动立即作用到界面并落盘。
 
 import { Modal } from "./modal";
-import { getSettings, updateSettings, type SortMode, type Theme } from "./settings";
+import { getSettings, updateSettings, type RotateMode, type SortMode, type Theme } from "./settings";
 
 export interface SettingsHooks {
   setFilmstrip(v: boolean): void;
   setInfo(v: boolean): void;
   setSort(v: SortMode): void;
   setTheme(v: Theme): void;
+  setRotateMode(v: RotateMode): void;
+  setFrameless(v: boolean): void;
 }
 
 export class SettingsPanel {
   private readonly modal: Modal;
   private readonly lightboxEl = document.getElementById("set-lightbox") as HTMLInputElement;
+  private readonly framelessEl = document.getElementById("set-frameless") as HTMLInputElement;
   private readonly filmstripEl = document.getElementById("set-filmstrip") as HTMLInputElement;
   private readonly infobarEl = document.getElementById("set-infobar") as HTMLInputElement;
   private readonly sortEl = document.getElementById("set-sort") as HTMLSelectElement;
   private readonly themeEl = document.getElementById("set-theme") as HTMLSelectElement;
+  private readonly rotateEl = document.getElementById("set-rotate") as HTMLSelectElement;
   private readonly hintEl = document.getElementById("settings-hint")!;
 
   constructor(private readonly hooks: SettingsHooks) {
@@ -33,6 +37,13 @@ export class SettingsPanel {
       this.hint(this.lightboxEl.checked
         ? "打开图片时将进入全屏灯箱（下次打开生效）"
         : "打开图片时使用普通窗口（下次打开生效）");
+    });
+    this.framelessEl.addEventListener("change", () => {
+      updateSettings({ frameless: this.framelessEl.checked });
+      this.hooks.setFrameless(this.framelessEl.checked);
+      this.hint(this.framelessEl.checked
+        ? "已隐藏标题栏：右键拖动移动窗口，Esc 退出软件"
+        : "已恢复标题栏");
     });
     this.filmstripEl.addEventListener("change", () => {
       updateSettings({ filmstrip: this.filmstripEl.checked });
@@ -52,6 +63,14 @@ export class SettingsPanel {
       updateSettings({ theme });
       this.hooks.setTheme(theme);
     });
+    this.rotateEl.addEventListener("change", () => {
+      const mode = this.rotateEl.value as RotateMode;
+      updateSettings({ rotate_mode: mode });
+      this.hooks.setRotateMode(mode);
+      this.hint(mode === "view"
+        ? "旋转只影响显示，不改动图片文件；方向会被记住，导出/复制时一并应用"
+        : "旋转会直接写入图片（JPEG 无损）；已记下的显示方向会在下一次旋转时一起写入");
+    });
 
     document.getElementById("settings-close")!.addEventListener("click", () => this.modal.close());
   }
@@ -67,10 +86,12 @@ export class SettingsPanel {
   private sync() {
     const s = getSettings();
     this.lightboxEl.checked = s.lightbox;
+    this.framelessEl.checked = s.frameless;
     this.filmstripEl.checked = s.filmstrip;
     this.infobarEl.checked = s.infobar;
     this.sortEl.value = s.sort;
     this.themeEl.value = s.theme;
+    this.rotateEl.value = s.rotate_mode;
     this.hintEl.textContent = "";
   }
 

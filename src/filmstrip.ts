@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ImageEntry } from "./types";
 import { TaskQueue } from "./queue";
+import { quarterOf } from "./rotation";
 import {
   THUMB_AROUND_RADIUS, THUMB_CONCURRENCY, THUMB_H, THUMB_MAX_LOADED, THUMB_PREFETCH_MARGIN, THUMB_W,
 } from "./config";
@@ -13,6 +14,9 @@ interface ThumbNode {
   el: HTMLElement;
   /** 在列表中的下标（删除后保持连续） */
   idx: number;
+  /** 用于校验"仅显示"旋转记录是否仍属同一份文件 */
+  size: number;
+  mtime: number;
   /** canvas 上已画有缩略图（像素占内存，离开范围会释放） */
   loaded: boolean;
   removed: boolean;
@@ -108,7 +112,10 @@ export class Filmstrip {
       el.className = "thumb";
       el.title = e.name;
       frag.appendChild(el);
-      const n: ThumbNode = { path: e.path, el, idx: i, loaded: false, removed: false };
+      const n: ThumbNode = {
+        path: e.path, el, idx: i, size: e.size, mtime: e.modified ?? 0,
+        loaded: false, removed: false,
+      };
       this.nodes.push(n);
       this.byPath.set(e.path, n);
       this.byEl.set(el, n);
@@ -237,9 +244,24 @@ export class Filmstrip {
     ctx.clearRect(0, 0, w, h);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    const s = Math.min(w / bmp.width, h / bmp.height);
-    ctx.drawImage(bmp, (w - bmp.width * s) / 2, (h - bmp.height * s) / 2,
-      bmp.width * s, bmp.height * s);
+
+    // "仅显示"旋转只记在设置里，缩略图得自己转（按旋转后的外框等比适配）
+    const quarter = quarterOf(n.path, n.size, n.mtime);
+    const swap = quarter % 2 === 1;
+    const boxW = swap ? bmp.height : bmp.width;
+    const boxH = swap ? bmp.width : bmp.height;
+    const s = Math.min(w / boxW, h / boxH);
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    if (quarter) ctx.rotate((quarter * Math.PI) / 2);
+    ctx.drawImage(
+      bmp,
+      (-bmp.width * s) / 2,
+      (-bmp.height * s) / 2,
+      bmp.width * s,
+      bmp.height * s,
+    );
+    ctx.restore();
     if (!n.loaded) {
       n.loaded = true;
       this.loadedCount++;

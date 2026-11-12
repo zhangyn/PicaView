@@ -27,6 +27,8 @@ const EXT_FOR: Record<Exclude<ExportFormat, "keep">, string> = {
 export interface ExportSource {
   path: string;
   animated: boolean;
+  /** "仅显示"模式下的顺时针 90° 次数 */
+  quarter: number;
 }
 
 export class Exporter {
@@ -108,6 +110,7 @@ export class Exporter {
     }
     if (this.format() === "webp") notes.push("WebP 为无损编码，体积可能较大");
     if (this.src?.animated) notes.push("动图只导出第一帧");
+    if (this.src?.quarter) notes.push("按当前显示方向导出");
     this.noteEl.textContent = notes.join(" · ");
 
     if (this.src && !this.destPicked) {
@@ -166,6 +169,7 @@ export class Exporter {
         maxSide: this.maxSide(),
         quality: Number(this.qualityEl.value),
         overwrite,
+        rotate: cur.quarter,
       });
       toast(`已导出 ${r.format} ${r.width}×${r.height}（${humanSize(r.bytes)}）`);
       this.modal.close();

@@ -7,12 +7,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { COPY_IMAGE_MAX_SIDE } from "./config";
 import { toast } from "./util";
 
-/** 复制当前图片到剪贴板；返回是否成功 */
-export async function copyImage(path: string): Promise<boolean> {
+/** 复制当前图片到剪贴板；quarter 为"仅显示"模式下的顺时针 90° 次数 */
+export async function copyImage(path: string, quarter = 0): Promise<boolean> {
   try {
     const [w, h] = await invoke<[number, number]>("copy_image", {
       path,
       maxSide: COPY_IMAGE_MAX_SIDE,
+      rotate: quarter,
     });
     toast(`已复制图片 ${w}×${h}，可直接粘贴`);
     return true;
@@ -34,9 +35,9 @@ export async function copyFiles(paths: string[]): Promise<boolean> {
   }
 }
 
-export async function setWallpaper(path: string): Promise<boolean> {
+export async function setWallpaper(path: string, quarter = 0): Promise<boolean> {
   try {
-    await invoke("set_wallpaper", { path });
+    await invoke("set_wallpaper", { path, rotate: quarter });
     toast("已设为桌面壁纸");
     return true;
   } catch (e) {

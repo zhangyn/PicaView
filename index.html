@@ -151,6 +151,10 @@
             <input id="set-lightbox" type="checkbox" />
           </label>
           <label class="modal-row">
+            <span>只看图片</span>
+            <input id="set-frameless" type="checkbox" />
+          </label>
+          <label class="modal-row">
             <span>胶片条</span>
             <input id="set-filmstrip" type="checkbox" />
           </label>
@@ -173,6 +177,13 @@
               <option value="dark">深色</option>
               <option value="light">浅色</option>
               <option value="system">跟随系统</option>
+            </select>
+          </label>
+          <label class="modal-row">
+            <span>旋转</span>
+            <select id="set-rotate">
+              <option value="view">仅旋转显示（不改文件）</option>
+              <option value="file">直接写入文件</option>
             </select>
           </label>
         </div>

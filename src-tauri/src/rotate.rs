@@ -8,12 +8,15 @@ use std::sync::{Condvar, LazyLock, Mutex};
 
 use image::{DynamicImage, ImageFormat};
 
+/// quarters：一次旋转多少个 90°（1..=3）。"仅显示"模式改成写文件时，
+/// 需要把攒下的显示方向一次性落地，避免前端连发多次命令、多次重读大文件。
 #[tauri::command]
-pub async fn rotate(path: String, clockwise: bool) -> Result<(), String> {
-    crate::imgscan::run_blocking(move || rotate_blocking(&path, clockwise)).await
+pub async fn rotate(path: String, clockwise: bool, quarters: Option<u8>) -> Result<(), String> {
+    let n = quarters.unwrap_or(1).clamp(1, 3);
+    crate::imgscan::run_blocking(move || rotate_blocking(&path, clockwise, n)).await
 }
 
-fn rotate_blocking(path: &str, clockwise: bool) -> Result<(), String> {
+fn rotate_blocking(path: &str, clockwise: bool, quarters: u8) -> Result<(), String> {
     let (p, ext) = crate::imgscan::checked_image_path(path)?;
     // 同一文件的"读取 → 变换 → 替换"必须串行，否则并发旋转会丢失其中一次
     let _guard = lock_path(&p);
@@ -24,8 +27,8 @@ fn rotate_blocking(path: &str, clockwise: bool) -> Result<(), String> {
     // 按内容嗅探真实格式（扩展名可能不可信）
     let fmt = sniff(&p)?;
     crate::imgscan::catch_decode("旋转", || match fmt {
-        ImageFormat::Jpeg => rotate_jpeg_lossless(&p, clockwise),
-        f => rotate_reencode(&p, f, clockwise),
+        ImageFormat::Jpeg => rotate_jpeg_lossless(&p, clockwise, quarters),
+        f => rotate_reencode(&p, f, clockwise, quarters),
     })
 }
 
@@ -158,17 +161,21 @@ fn orientation_xform(o: u32) -> Xform {
     }
 }
 
-/// 在已有 EXIF 方向 `orientation` 的基础上再旋转 90°，合成为一次存储像素变换。
-/// 变换完成后方向标签应复位为 1。
-fn compose_rotation(orientation: u32, clockwise: bool) -> Xform {
+/// 在已有方向基础上连续转 quarters 个 90°（1..=3），仍合成为一次变换。
+/// 档位由命令层限制在 1..=3；这里不夹紧，便于测试 4 档 = 恒等。
+fn compose_turns(orientation: u32, clockwise: bool, quarters: u8) -> Xform {
     let rot = if clockwise { Xform::Rot90 } else { Xform::Rot270 };
-    orientation_xform(orientation).then(rot)
+    let mut x = orientation_xform(orientation);
+    for _ in 0..quarters {
+        x = x.then(rot);
+    }
+    x
 }
 
 /// libjpeg-turbo tjTransform：只变换 DCT 系数，像素级无损
-fn rotate_jpeg_lossless(p: &Path, clockwise: bool) -> Result<(), String> {
+fn rotate_jpeg_lossless(p: &Path, clockwise: bool, quarters: u8) -> Result<(), String> {
     let src = std::fs::read(p).map_err(|e| e.to_string())?;
-    let op = compose_rotation(read_orientation(&src), clockwise).to_op();
+    let op = compose_turns(read_orientation(&src), clockwise, quarters).to_op();
     let mut xform = turbojpeg::Transform::op(op);
     // 宽高不是 MCU 整数倍时丢弃无法变换的边缘块，避免边缘出现错位条带
     xform.trim = true;
@@ -180,7 +187,7 @@ fn rotate_jpeg_lossless(p: &Path, clockwise: bool) -> Result<(), String> {
     replace_file(p, &out)
 }
 
-fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), String> {
+fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool, quarters: u8) -> Result<(), String> {
     // 按内容嗅探格式（扩展名可能不可信）；限制取有限的大值以支持超大图
     let f = std::fs::File::open(p).map_err(|e| e.to_string())?;
     let mut reader = image::ImageReader::new(std::io::BufReader::new(f));
@@ -191,11 +198,14 @@ fn rotate_reencode(p: &Path, fmt: ImageFormat, clockwise: bool) -> Result<(), St
         .decode()
         .map_err(|e| format!("解码失败: {e}"))?;
     let img = crate::exifinfo::oriented_dynamic(img, &p.to_string_lossy());
-    let rotated: DynamicImage = if clockwise {
-        img.rotate90()
-    } else {
-        img.rotate270()
-    };
+    let mut rotated: DynamicImage = img;
+    for _ in 0..quarters {
+        rotated = if clockwise {
+            rotated.rotate90()
+        } else {
+            rotated.rotate270()
+        };
+    }
     let mut out = Vec::new();
     match fmt {
         ImageFormat::WebP => {
@@ -393,7 +403,7 @@ mod tests {
         use Xform::*;
         let expect = [Rot90, Transverse, Rot270, Transpose, Hflip, Rot180, Vflip, None];
         for (i, want) in expect.iter().enumerate() {
-            assert_eq!(compose_rotation(i as u32 + 1, true), *want, "orientation {}", i + 1);
+            assert_eq!(compose_turns(i as u32 + 1, true, 1), *want, "orientation {}", i + 1);
         }
     }
 
@@ -402,15 +412,29 @@ mod tests {
         use Xform::*;
         let expect = [Rot270, Transpose, Rot90, Transverse, Vflip, None, Hflip, Rot180];
         for (i, want) in expect.iter().enumerate() {
-            assert_eq!(compose_rotation(i as u32 + 1, false), *want, "orientation {}", i + 1);
+            assert_eq!(compose_turns(i as u32 + 1, false, 1), *want, "orientation {}", i + 1);
+        }
+    }
+
+    #[test]
+    fn compose_turns_matches_group_algebra() {
+        for o in 1..=8u32 {
+            // 4 档回到原方向（不写文件）
+            assert_eq!(compose_turns(o, true, 4), orientation_xform(o));
+            assert_eq!(compose_turns(o, false, 4), orientation_xform(o));
+            // 连转 2 档 = 在原有方向上再叠 180°
+            assert_eq!(compose_turns(o, true, 2), orientation_xform(o).then(Xform::Rot180));
+            assert_eq!(compose_turns(o, false, 2), orientation_xform(o).then(Xform::Rot180));
+            // 逆时针 3 档 = 顺时针 1 档
+            assert_eq!(compose_turns(o, false, 3), compose_turns(o, true, 1));
         }
     }
 
     #[test]
     fn compose_out_of_range_treated_as_one() {
         for o in [0, 9, 100, u32::MAX] {
-            assert_eq!(compose_rotation(o, true), Xform::Rot90);
-            assert_eq!(compose_rotation(o, false), Xform::Rot270);
+            assert_eq!(compose_turns(o, true, 1), Xform::Rot90);
+            assert_eq!(compose_turns(o, false, 1), Xform::Rot270);
         }
     }
 
@@ -423,22 +447,22 @@ mod tests {
     fn compose_is_self_consistent() {
         for o in 1..=8u32 {
             // 顺时针后再逆时针 = 回到原方向
-            let cw = compose_rotation(o, true);
-            assert_eq!(compose_rotation(orientation_of(cw), false), orientation_xform(o), "o={o} cw→ccw");
-            let ccw = compose_rotation(o, false);
-            assert_eq!(compose_rotation(orientation_of(ccw), true), orientation_xform(o), "o={o} ccw→cw");
+            let cw = compose_turns(o, true, 1);
+            assert_eq!(compose_turns(orientation_of(cw), false, 1), orientation_xform(o), "o={o} cw→ccw");
+            let ccw = compose_turns(o, false, 1);
+            assert_eq!(compose_turns(orientation_of(ccw), true, 1), orientation_xform(o), "o={o} ccw→cw");
 
             // 连续 4 次同向旋转 = 回到原方向
             for dir in [true, false] {
                 let mut cur = o;
                 for _ in 0..4 {
-                    cur = orientation_of(compose_rotation(cur, dir));
+                    cur = orientation_of(compose_turns(cur, dir, 1));
                 }
                 assert_eq!(cur, o, "o={o} dir={dir}");
             }
 
             // 两次同向旋转 = 在原方向上加 180°
-            let twice = orientation_of(compose_rotation(orientation_of(cw), true));
+            let twice = orientation_of(compose_turns(orientation_of(cw), true, 1));
             assert_eq!(orientation_xform(twice), orientation_xform(o).then(Xform::Rot180));
 
             // 顺时针与逆时针结果不同
@@ -500,7 +524,7 @@ mod tests {
             for cw in [true, false] {
                 let displayed = crate::exifinfo::apply_orientation(stored.clone(), o);
                 let want = if cw { displayed.rotate90() } else { displayed.rotate270() };
-                let got = apply_xform(&stored, compose_rotation(o, cw));
+                let got = apply_xform(&stored, compose_turns(o, cw, 1));
                 assert_eq!(pixels(&got), pixels(&want), "o={o} cw={cw}");
             }
         }
@@ -637,7 +661,7 @@ mod tests {
         }
         // 重编码旋转后：尺寸交换，ICC 仍在
         let fmt = sniff(&p).unwrap();
-        rotate_reencode(&p, fmt, true).unwrap();
+        rotate_reencode(&p, fmt, true, 1).unwrap();
         let dec = image::load_from_memory(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!((dec.width(), dec.height()), (4, 8));
         assert_eq!(png_icc_profile(&p), Some(icc));
@@ -666,14 +690,14 @@ mod tests {
         std::fs::write(&f, &j).unwrap();
 
         // 方向 6 + 顺时针 → 合成 Rot180：尺寸不变，方向复位为 1
-        rotate_jpeg_lossless(&f, true).unwrap();
+        rotate_jpeg_lossless(&f, true, 1).unwrap();
         let out = std::fs::read(&f).unwrap();
         assert_eq!(read_orientation(&out), 1);
         let dec = image::load_from_memory(&out).unwrap();
         assert_eq!(dec.dimensions(), (48, 32));
 
         // 方向 1（再旋转一次后）+ 逆时针 → Rot270：宽高互换
-        rotate_jpeg_lossless(&f, false).unwrap();
+        rotate_jpeg_lossless(&f, false, 1).unwrap();
         let dec = image::load_from_memory(&std::fs::read(&f).unwrap()).unwrap();
         assert_eq!(dec.dimensions(), (32, 48));
         let _ = std::fs::remove_dir_all(&dir);

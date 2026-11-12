@@ -10,14 +10,21 @@ use std::io::BufWriter;
 use std::path::Path;
 
 /// 复制图片到剪贴板，返回实际写入的像素尺寸
+/// rotate：顺时针 90° 的次数（"仅显示"模式下的方向），0..=3
 #[tauri::command]
-pub async fn copy_image(path: String, max_side: u32) -> Result<(u32, u32), String> {
-    crate::imgscan::run_blocking(move || copy_image_blocking(&path, max_side)).await
+pub async fn copy_image(
+    path: String,
+    max_side: u32,
+    rotate: Option<u8>,
+) -> Result<(u32, u32), String> {
+    let q = rotate.unwrap_or(0);
+    crate::imgscan::run_blocking(move || copy_image_blocking(&path, max_side, q)).await
 }
 
-fn copy_image_blocking(path: &str, max_side: u32) -> Result<(u32, u32), String> {
+fn copy_image_blocking(path: &str, max_side: u32, rotate: u8) -> Result<(u32, u32), String> {
     let (src, _) = crate::imgscan::checked_image_path(path)?;
     let img = crate::thumbs::decode_at(&src, max_side.clamp(256, 16384))?;
+    let img = crate::thumbs::rotate_quarter(img, rotate);
     let (w, h) = (img.width(), img.height());
     let rgba = img.to_rgba8();
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("打开剪贴板失败: {e}"))?;
@@ -58,18 +65,28 @@ fn copy_files_blocking(paths: &[String]) -> Result<usize, String> {
 
 /// 把当前图片设为桌面壁纸
 #[tauri::command]
-pub async fn set_wallpaper(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    crate::imgscan::run_blocking(move || set_wallpaper_blocking(&app, &path)).await
+pub async fn set_wallpaper(
+    app: tauri::AppHandle,
+    path: String,
+    rotate: Option<u8>,
+) -> Result<(), String> {
+    let q = rotate.unwrap_or(0);
+    crate::imgscan::run_blocking(move || set_wallpaper_blocking(&app, &path, q)).await
 }
 
 /// 壁纸解码上限：4K/8K 屏都够用，再大只是白占内存
 const WALLPAPER_MAX_SIDE: u32 = 8192;
 
-fn set_wallpaper_blocking(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+fn set_wallpaper_blocking(
+    app: &tauri::AppHandle,
+    path: &str,
+    rotate: u8,
+) -> Result<(), String> {
     use tauri::Manager;
 
     let (src, _) = crate::imgscan::checked_image_path(path)?;
     let img = crate::thumbs::decode_at(&src, WALLPAPER_MAX_SIDE)?;
+    let img = crate::thumbs::rotate_quarter(img, rotate);
     let dir = app
         .path()
         .app_cache_dir()

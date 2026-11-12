@@ -27,14 +27,14 @@ function validateName(name: string): string | null {
 export class Ops {
   constructor(private cb: OpsCallbacks) {}
 
-  /** 无损旋转；动图直接拒绝（Rust 侧也会兜底）。返回是否真的旋转成功 */
-  async rotate(entry: ImageEntry, clockwise: boolean): Promise<boolean> {
+  /** 无损旋转 quarters 个 90°；动图直接拒绝（Rust 侧也会兜底）。返回是否真的旋转成功 */
+  async rotate(entry: ImageEntry, clockwise: boolean, quarters = 1): Promise<boolean> {
     if (entry.animated) {
       toast("动图暂不支持旋转");
       return false;
     }
     try {
-      await invoke("rotate", { path: entry.path, clockwise });
+      await invoke("rotate", { path: entry.path, clockwise, quarters });
       this.cb.onRotated(entry.path);
       // image 的 WebP 编码器只有无损档：有损 WebP 旋转后体积可能明显变大，明确告知
       if (extOf(entry.path) === "webp") {

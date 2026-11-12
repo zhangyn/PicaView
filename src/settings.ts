@@ -8,10 +8,23 @@ import { SETTINGS_SAVE_DEBOUNCE_MS } from "./config";
 
 export type SortMode = "name" | "name_desc" | "modified" | "size";
 export type Theme = "dark" | "light" | "system";
+export type RotateMode = "view" | "file";
+
+/** 仅显示模式的旋转记录（与 Rust RotationMark 对应） */
+export interface RotationMark {
+  path: string;
+  /** 顺时针 90° 的次数 0..3 */
+  quarter: number;
+  size: number;
+  /** 毫秒时间戳 */
+  mtime: number;
+}
 
 export interface Settings {
   /** 打开图片即进入全屏灯箱 */
   lightbox: boolean;
+  /** 只看图片：隐藏标题栏 */
+  frameless: boolean;
   /** 胶片条默认显示 */
   filmstrip: boolean;
   /** 信息浮层默认显示 */
@@ -20,6 +33,10 @@ export interface Settings {
   sort: SortMode;
   /** 界面主题 */
   theme: Theme;
+  /** 旋转方式：view = 只改显示（默认），file = 写回文件 */
+  rotate_mode: RotateMode;
+  /** 仅显示模式的旋转记录 */
+  rotations: RotationMark[];
 }
 
 export const SORT_LABELS: Record<SortMode, string> = {
@@ -31,10 +48,13 @@ export const SORT_LABELS: Record<SortMode, string> = {
 
 const DEFAULTS: Settings = {
   lightbox: true,
+  frameless: false,
   filmstrip: true,
   infobar: true,
   sort: "name",
   theme: "dark",
+  rotate_mode: "view",
+  rotations: [],
 };
 
 let current: Settings = { ...DEFAULTS };

@@ -4,6 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { DETAILS_DEBOUNCE_MS } from "./config";
 import type { ImageDetails } from "./types";
+import { quarterOf } from "./rotation";
 import { formatDateTime, humanSize, toast } from "./util";
 
 type Row = [label: string, value: string | null | undefined, warn?: boolean];
@@ -200,6 +201,14 @@ export class DetailsPanel {
       ["修改时间", formatDateTime(f.modified)],
       ["访问时间", formatDateTime(f.accessed)],
       ["只读", f.readonly ? "是" : null],
+      // 仅显示模式下的方向：文件本身没被改动，明确标出来免得用户以为白转了
+      [
+        "旋转",
+        quarterOf(f.path, f.size, f.modified)
+          ? `${quarterOf(f.path, f.size, f.modified) * 90}° 顺时针（仅显示，未写入文件）`
+          : null,
+        true,
+      ],
     ]);
     this.pathEl = fileSec.cell("完整路径");
     frag.append(fileSec.el);

@@ -187,6 +187,7 @@ fn export_blocking(
     max_side: Option<u32>,
     quality: Option<u8>,
     overwrite: bool,
+    rotate: u8,
 ) -> Result<ExportResult, String> {
     let (src_long, _) = imgscan::checked_image_path(src)?;
     if dest.trim().is_empty() {
@@ -206,6 +207,7 @@ fn export_blocking(
         .map(|v| v.min(MAX_DIMENSION))
         .unwrap_or(MAX_DIMENSION);
     let img = crate::thumbs::decode_at(&src_long, limit)?;
+    let img = crate::thumbs::rotate_quarter(img, rotate);
     let (w, h) = (img.width(), img.height());
     let bytes = crate::imgscan::catch_decode("导出", || {
         encode(&img, fmt, quality.unwrap_or(92).clamp(1, 100), &src_long)
@@ -220,6 +222,7 @@ fn export_blocking(
     })
 }
 
+/// max_side 限的是旋转后的长边（与用户看到的画面一致）
 #[tauri::command]
 pub async fn export_image(
     src: String,
@@ -228,7 +231,9 @@ pub async fn export_image(
     max_side: Option<u32>,
     quality: Option<u8>,
     overwrite: Option<bool>,
+    rotate: Option<u8>,
 ) -> Result<ExportResult, String> {
+    let q = rotate.unwrap_or(0);
     imgscan::run_blocking(move || {
         export_blocking(
             &src,
@@ -237,6 +242,7 @@ pub async fn export_image(
             max_side,
             quality,
             overwrite.unwrap_or(false),
+            q,
         )
     })
     .await
@@ -325,6 +331,7 @@ mod tests {
             Some(50),
             Some(90),
             false,
+            0,
         )
         .unwrap();
         assert!(r.path.ends_with("out.jpg"), "{}", r.path);
@@ -351,6 +358,7 @@ mod tests {
             None,
             None,
             false,
+            0,
         )
         .unwrap_err();
         assert_eq!(err, "目标文件已存在");
@@ -362,6 +370,7 @@ mod tests {
             None,
             None,
             true,
+            0,
         )
         .unwrap();
         assert!(fs::read(&r.path).unwrap().starts_with(b"\x89PNG"));
@@ -379,6 +388,7 @@ mod tests {
             None,
             None,
             true,
+            0,
         )
         .unwrap_err();
         assert_eq!(err, "不能覆盖正在导出的原图");
@@ -401,6 +411,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
             )
             .unwrap();
             assert!(r.path.ends_with(fmt.ext()));

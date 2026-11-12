@@ -152,6 +152,17 @@ pub fn thumb_bytes_sync(app: &tauri::AppHandle, path: &str) -> Result<Vec<u8>, S
     }
 }
 
+/// 顺时针旋转 q 个 90°（q 取 0..=3）。
+/// "仅显示"模式下的输出（复制到剪贴板 / 导出 / 设为壁纸）靠它把显示方向落地。
+pub fn rotate_quarter(img: image::DynamicImage, q: u8) -> image::DynamicImage {
+    match q % 4 {
+        1 => img.rotate90(),
+        2 => img.rotate180(),
+        3 => img.rotate270(),
+        _ => img,
+    }
+}
+
 fn generate(p: &Path) -> Result<Vec<u8>, String> {
     // JPEG 先走 turbojpeg 的 DCT 域缩放解码：只解到接近目标尺寸，
     // 峰值内存与耗时都远低于"整图解码再缩"；失败（非 JPEG/损坏）则退回通用解码
@@ -350,6 +361,35 @@ mod tests {
             assert!(scaled >= 240, "{w}x{h} → {scaled}");
             assert!(scaled <= 240 * 8, "{w}x{h} → {scaled}（过度解码）");
         }
+    }
+
+    #[test]
+    fn rotate_quarter_swaps_dimensions_and_pixels() {
+        // 3x2 灰度：像素值 = y*3 + x + 1
+        let img = image::GrayImage::from_fn(3, 2, |x, y| image::Luma([(y * 3 + x + 1) as u8]));
+        let src = image::DynamicImage::ImageLuma8(img);
+
+        let same = rotate_quarter(src.clone(), 0).to_luma8();
+        assert_eq!((same.width(), same.height()), (3, 2));
+
+        // 顺时针 90°：左上角来自左下角
+        let r1 = rotate_quarter(src.clone(), 1).to_luma8();
+        assert_eq!((r1.width(), r1.height()), (2, 3));
+        assert_eq!(r1.get_pixel(0, 0).0[0], 4); // 原图 (0,1)
+        assert_eq!(r1.get_pixel(1, 0).0[0], 1); // 原图 (0,0)
+
+        let r2 = rotate_quarter(src.clone(), 2).to_luma8();
+        assert_eq!((r2.width(), r2.height()), (3, 2));
+        assert_eq!(r2.get_pixel(0, 0).0[0], 6); // 原图 (2,1)
+
+        let r3 = rotate_quarter(src.clone(), 3).to_luma8();
+        assert_eq!((r3.width(), r3.height()), (2, 3));
+        assert_eq!(r3.get_pixel(0, 0).0[0], 3); // 原图 (2,0)
+
+        // 反向再转一次回到原样
+        let back = rotate_quarter(rotate_quarter(src.clone(), 3), 1).to_luma8();
+        assert_eq!(back.dimensions(), (3, 2));
+        assert_eq!(back.get_pixel(2, 1).0[0], 6);
     }
 
     #[test]

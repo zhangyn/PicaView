@@ -9,6 +9,31 @@ use std::path::PathBuf;
 
 use crate::imgscan::SortMode;
 
+/// 旋转方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RotateMode {
+    /// 只旋转显示，绝不改写图片文件（默认）
+    #[default]
+    View,
+    /// 直接把结果写回文件（JPEG 走无损变换）
+    File,
+}
+
+/// 仅显示的旋转记录：按 路径 + 大小 + 修改时间 校验，文件一变（外部修改/替换）即失效
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationMark {
+    pub path: String,
+    /// 顺时针 90° 的次数（0..=3）
+    pub quarter: u8,
+    pub size: u64,
+    /// 毫秒时间戳，与 ImageEntry.modified 一致
+    pub mtime: u64,
+}
+
+/// 显示旋转记录的上限：超出后从最旧的开始丢
+const ROTATION_MAX: usize = 1024;
+
 /// 界面主题
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +50,8 @@ pub enum Theme {
 pub struct Settings {
     /// 打开图片即进入全屏灯箱（关掉则用普通窗口看图）
     pub lightbox: bool,
+    /// 只看图片：隐藏标题栏（无边框窗口）
+    pub frameless: bool,
     /// 胶片条默认显示
     pub filmstrip: bool,
     /// 信息浮层默认显示
@@ -33,16 +60,23 @@ pub struct Settings {
     pub sort: SortMode,
     /// 界面主题（同时影响窗口标题栏）
     pub theme: Theme,
+    /// 旋转方式：默认只改显示，不动文件
+    pub rotate_mode: RotateMode,
+    /// 仅显示模式的旋转记录（有序，越靠后越新）
+    pub rotations: Vec<RotationMark>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             lightbox: true,
+            frameless: false,
             filmstrip: true,
             infobar: true,
             sort: SortMode::Name,
             theme: Theme::Dark,
+            rotate_mode: RotateMode::View,
+            rotations: Vec::new(),
         }
     }
 }
@@ -82,12 +116,22 @@ pub fn save(app: &tauri::AppHandle, s: &Settings) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     }
     // 原子写：先写同目录临时文件，再改名覆盖，避免写一半断电留下坏 JSON
+    let mut trimmed = s.clone();
+    prune_rotations(&mut trimmed.rotations);
     let tmp = p.with_extension("json.tmp");
-    fs::write(&tmp, s.to_json()).map_err(|e| format!("写设置失败: {e}"))?;
+    fs::write(&tmp, trimmed.to_json()).map_err(|e| format!("写设置失败: {e}"))?;
     fs::rename(&tmp, &p).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("保存设置失败: {e}")
     })
+}
+
+/// 只保留最近的若干条旋转记录，避免 settings.json 无限膨胀
+fn prune_rotations(list: &mut Vec<RotationMark>) {
+    if list.len() > ROTATION_MAX {
+        let cut = list.len() - ROTATION_MAX;
+        list.drain(..cut);
+    }
 }
 
 #[tauri::command]
@@ -117,10 +161,18 @@ mod tests {
     fn roundtrip_keeps_all_fields() {
         let s = Settings {
             lightbox: false,
+            frameless: true,
             filmstrip: false,
             infobar: false,
             sort: SortMode::Modified,
             theme: Theme::Light,
+            rotate_mode: RotateMode::File,
+            rotations: vec![RotationMark {
+                path: "c:\\a.jpg".into(),
+                quarter: 1,
+                size: 123,
+                mtime: 456,
+            }],
         };
         assert_eq!(Settings::from_json(&s.to_json()), s);
     }
@@ -133,6 +185,36 @@ mod tests {
         assert!(s.infobar);
         assert_eq!(s.sort, SortMode::Name);
         assert_eq!(s.theme, Theme::Dark);
+        // 默认不改动文件、也不隐藏标题栏
+        assert_eq!(s.rotate_mode, RotateMode::View);
+        assert!(s.rotations.is_empty());
+        assert!(!s.frameless);
+    }
+
+    #[test]
+    fn rotation_marks_are_pruned_to_newest() {
+        let mut list: Vec<RotationMark> = (0..ROTATION_MAX + 5)
+            .map(|i| RotationMark {
+                path: format!("c:\\{i}.jpg"),
+                quarter: 1,
+                size: i as u64,
+                mtime: i as u64,
+            })
+            .collect();
+        prune_rotations(&mut list);
+        assert_eq!(list.len(), ROTATION_MAX);
+        // 保留的是最新的那批
+        assert_eq!(list.first().unwrap().path, "c:\\5.jpg");
+        assert_eq!(
+            list.last().unwrap().path,
+            format!("c:\\{}.jpg", ROTATION_MAX + 4)
+        );
+    }
+
+    #[test]
+    fn rotate_mode_serializes_to_snake_case() {
+        assert_eq!(serde_json::to_string(&RotateMode::View).unwrap(), "\"view\"");
+        assert_eq!(serde_json::to_string(&RotateMode::File).unwrap(), "\"file\"");
     }
 
     #[test]
