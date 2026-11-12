@@ -3,6 +3,8 @@ name = "picaview"
 version = "0.1.0"
 description = "极简看图软件"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/zhangyn/PicaView"
 
 [features]
 # tauri build 会自动启用；裸 cargo build --release 缺此特性会以 dev 模式加载前端

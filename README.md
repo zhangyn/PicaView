@@ -3,7 +3,7 @@
 极简看图软件——参照 Google 的 Picasa 照片查看器：快、顺滑、只看图。
 无图库、无相册、无人脸、无编辑、无联网。
 
-![tech](https://img.shields.io/badge/Tauri-2-blue) ![platform](https://img.shields.io/badge/Windows-10%2F11-lightgrey)
+![tech](https://img.shields.io/badge/Tauri-2-blue) ![platform](https://img.shields.io/badge/Windows-10%2F11-lightgrey) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ## 功能
 
@@ -177,3 +177,11 @@ turbojpeg 已禁用 `require-simd` 特性，无需 NASM。
   绝不让配置把软件卡住
 - Rust 侧 92 项单测（路径规范化、动图探测、EXIF 方向群运算、排序、缩略图、导出、设置）；
   CI 在 Windows 上跑 `cargo test` + `cargo clippy` + 前端构建，tag 触发打包发布
+
+## 许可证
+
+[MIT](LICENSE) © 2026 zhangyn
+
+第三方依赖各自的许可证见 `Cargo.lock` / `package-lock.json`：
+turbojpeg（IJG/libjpeg-turbo，BSD 风格 + IJG）、image（MIT/Apache-2.0）、
+arboard（MIT/Apache-2.0）、trash（MIT）、Tauri（MIT/Apache-2.0）。
