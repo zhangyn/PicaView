@@ -1083,7 +1083,7 @@ async function revealCurrent() {
   const p = currentPath();
   if (!p) return;
   try {
-    await invoke("reveal_in_explorer", { path: p });
+    await invoke("reveal_path", { path: p });
   } catch (err) {
     toast(`无法在资源管理器中显示：${String(err)}`);
   }

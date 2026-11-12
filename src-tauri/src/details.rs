@@ -144,9 +144,10 @@ fn luma_bins(img: &image::GrayImage) -> Vec<u32> {
     bins
 }
 
-/// 在资源管理器中定位并选中文件
+/// 在资源管理器中定位并选中任意文件（不要求是图片）。
+/// 文件不存在时 Explorer 会打开它所在的文件夹——正是"定位"想要的兜底行为。
 #[tauri::command]
-pub async fn reveal_in_explorer(path: String) -> Result<(), String> {
+pub async fn reveal_path(path: String) -> Result<(), String> {
     crate::imgscan::run_blocking(move || reveal_blocking(&path)).await
 }
 
@@ -671,9 +672,12 @@ fn select_arg(plain: &Path) -> Result<String, String> {
 }
 
 fn reveal_blocking(path: &str) -> Result<(), String> {
-    let (lp, _) = crate::imgscan::checked_image_path(path)?;
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+    // 不做"必须是图片"的校验：日志、导出目标等也该能定位
     // explorer 的 /select 不认 \\?\ 前缀
-    let plain = crate::imgscan::plain_path(&lp.to_string_lossy());
+    let plain = crate::imgscan::plain_path(path);
     let arg = select_arg(&plain)?;
     spawn_explorer(&arg)
 }

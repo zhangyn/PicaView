@@ -87,7 +87,7 @@ fn main() {
             exifinfo::read_exif,
             exifinfo::extract_preview,
             details::get_image_details,
-            details::reveal_in_explorer,
+            details::reveal_path,
             thumbs::thumbnail,
             rotate::rotate,
             ops::rename_file,

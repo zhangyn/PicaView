@@ -374,7 +374,7 @@ export class DetailsPanel {
   private async reveal() {
     if (!this.path) return;
     try {
-      await invoke("reveal_in_explorer", { path: this.path });
+      await invoke("reveal_path", { path: this.path });
     } catch (e) {
       toast(`无法在资源管理器中显示：${String(e)}`);
     }
