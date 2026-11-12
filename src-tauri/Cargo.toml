@@ -1,6 +1,6 @@
 [package]
 name = "picaview"
-version = "0.1.0"
+version = "0.2.0"
 description = "极简看图软件"
 edition = "2021"
 license = "MIT"
