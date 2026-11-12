@@ -34,6 +34,20 @@ pub struct RotationMark {
 /// 显示旋转记录的上限：超出后从最旧的开始丢
 const ROTATION_MAX: usize = 1024;
 
+/// 最近文件夹的上限
+pub const RECENT_DIRS_MAX: usize = 8;
+
+/// 滚轮行为
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelMode {
+    /// 滚轮缩放（默认，Ctrl+滚轮也是缩放）
+    #[default]
+    Zoom,
+    /// 滚轮翻页（Ctrl+滚轮缩放）
+    Page,
+}
+
 /// 界面主题
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +78,12 @@ pub struct Settings {
     pub rotate_mode: RotateMode,
     /// 仅显示模式的旋转记录（有序，越靠后越新）
     pub rotations: Vec<RotationMark>,
+    /// 滚轮行为：缩放 / 翻页
+    pub wheel: WheelMode,
+    /// 启动时自动打开上次的文件夹
+    pub restore_last_dir: bool,
+    /// 最近打开过的文件夹（最新在前）
+    pub recent_dirs: Vec<String>,
 }
 
 impl Default for Settings {
@@ -77,6 +97,9 @@ impl Default for Settings {
             theme: Theme::Dark,
             rotate_mode: RotateMode::View,
             rotations: Vec::new(),
+            wheel: WheelMode::Zoom,
+            restore_last_dir: false,
+            recent_dirs: Vec::new(),
         }
     }
 }
@@ -118,12 +141,18 @@ pub fn save(app: &tauri::AppHandle, s: &Settings) -> Result<(), String> {
     // 原子写：先写同目录临时文件，再改名覆盖，避免写一半断电留下坏 JSON
     let mut trimmed = s.clone();
     prune_rotations(&mut trimmed.rotations);
+    prune_recent(&mut trimmed.recent_dirs);
     let tmp = p.with_extension("json.tmp");
     fs::write(&tmp, trimmed.to_json()).map_err(|e| format!("写设置失败: {e}"))?;
     fs::rename(&tmp, &p).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("保存设置失败: {e}")
     })
+}
+
+/// 最近文件夹只留前 RECENT_DIRS_MAX 条（最新在前，不重排）
+fn prune_recent(list: &mut Vec<String>) {
+    list.truncate(RECENT_DIRS_MAX);
 }
 
 /// 只保留最近的若干条旋转记录，避免 settings.json 无限膨胀
@@ -173,6 +202,9 @@ mod tests {
                 size: 123,
                 mtime: 456,
             }],
+            wheel: WheelMode::Page,
+            restore_last_dir: true,
+            recent_dirs: vec!["c:\\pics".into(), "d:\\img".into()],
         };
         assert_eq!(Settings::from_json(&s.to_json()), s);
     }
@@ -189,6 +221,9 @@ mod tests {
         assert_eq!(s.rotate_mode, RotateMode::View);
         assert!(s.rotations.is_empty());
         assert!(!s.frameless);
+        assert_eq!(s.wheel, WheelMode::Zoom);
+        assert!(!s.restore_last_dir);
+        assert!(s.recent_dirs.is_empty());
     }
 
     #[test]
@@ -209,6 +244,31 @@ mod tests {
             list.last().unwrap().path,
             format!("c:\\{}.jpg", ROTATION_MAX + 4)
         );
+    }
+
+    #[test]
+    fn recent_dirs_keep_newest_first_and_get_capped() {
+        let mut list: Vec<String> = (0..RECENT_DIRS_MAX + 4)
+            .map(|i| format!("c:\\dir{i}"))
+            .collect();
+        prune_recent(&mut list);
+        assert_eq!(list.len(), RECENT_DIRS_MAX);
+        // 最新在前：截断只丢尾部
+        assert_eq!(list.first().unwrap(), "c:\\dir0");
+        assert_eq!(
+            list.last().unwrap(),
+            &format!("c:\\dir{}", RECENT_DIRS_MAX - 1)
+        );
+        // 不足上限时原样保留
+        let mut few = vec!["c:\\a".to_string()];
+        prune_recent(&mut few);
+        assert_eq!(few, vec!["c:\\a".to_string()]);
+    }
+
+    #[test]
+    fn wheel_mode_serializes_to_snake_case() {
+        assert_eq!(serde_json::to_string(&WheelMode::Zoom).unwrap(), "\"zoom\"");
+        assert_eq!(serde_json::to_string(&WheelMode::Page).unwrap(), "\"page\"");
     }
 
     #[test]

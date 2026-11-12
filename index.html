@@ -28,8 +28,12 @@
     <div id="empty" class="hidden">
       <div class="empty-icon">🖼</div>
       <div class="empty-title">PicaView</div>
-      <div class="empty-hint">把图片拖到这里，双击或点击下方按钮选择图片</div>
-      <button type="button" id="btn-open" class="empty-btn" aria-label="打开图片…">打开图片…</button>
+      <div class="empty-hint">把图片或文件夹拖到这里，或点击下方按钮</div>
+      <div class="empty-actions">
+        <button type="button" id="btn-open" class="empty-btn" aria-label="打开图片…">打开图片…</button>
+        <button type="button" id="btn-open-folder" class="empty-btn" aria-label="打开文件夹…">打开文件夹…</button>
+      </div>
+      <div id="recent-dirs" class="hidden" aria-label="最近打开的文件夹"></div>
     </div>
 
     <!-- 信息浮层（左下） -->
@@ -67,14 +71,21 @@
     </div>
 
     <!-- 更多操作菜单（复制图片/文件、设为壁纸） -->
-    <div id="more-menu" class="hidden" role="menu" aria-label="更多操作">
+    <div id="more-menu" class="popup hidden" role="menu" aria-label="更多操作">
+      <button type="button" role="menuitem" data-act="open-file">打开图片…<kbd>Ctrl+O</kbd></button>
+      <button type="button" role="menuitem" data-act="open-folder">打开文件夹…<kbd>Ctrl+Shift+O</kbd></button>
+      <div class="menu-sep" role="separator"></div>
       <button type="button" role="menuitem" data-act="copy-image">复制图片<kbd>Ctrl+C</kbd></button>
       <button type="button" role="menuitem" data-act="copy-file">复制文件<kbd>Ctrl+Shift+C</kbd></button>
       <button type="button" role="menuitem" data-act="export">另存为 / 导出…<kbd>Ctrl+E</kbd></button>
       <button type="button" role="menuitem" data-act="wallpaper">设为桌面壁纸</button>
       <div class="menu-sep" role="separator"></div>
+      <button type="button" role="menuitem" data-act="shortcuts">快捷键…<kbd>?</kbd></button>
       <button type="button" role="menuitem" data-act="settings">设置…</button>
     </div>
+
+    <!-- 右键菜单（内容由 contextmenu.ts 动态生成） -->
+    <div id="context-menu" class="popup hidden" role="menu" aria-label="图片操作"></div>
 
     <!-- 取色探针（C 键开关） -->
     <div id="pixel-probe" class="hidden" aria-live="off">
@@ -171,6 +182,17 @@
             </select>
           </label>
           <label class="modal-row">
+            <span>滚轮</span>
+            <select id="set-wheel">
+              <option value="zoom">缩放（Ctrl+滚轮也缩放）</option>
+              <option value="page">翻页（Ctrl+滚轮缩放）</option>
+            </select>
+          </label>
+          <label class="modal-row">
+            <span>恢复上次文件夹</span>
+            <input id="set-restore" type="checkbox" />
+          </label>
+          <label class="modal-row">
             <span>主题</span>
             <select id="set-theme">
               <option value="dark">深色</option>
@@ -189,6 +211,61 @@
         <p id="settings-hint" class="modal-hint"></p>
         <div class="modal-actions">
           <button type="button" id="settings-close" class="modal-primary">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 快捷键一览 -->
+    <div id="help-backdrop" class="modal-backdrop hidden">
+      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <h2 id="help-title" class="modal-title">快捷键</h2>
+        <div class="help-grid">
+          <h3>浏览</h3>
+          <div class="help-item"><span><kbd>←</kbd><kbd>→</kbd></span><em>翻页（放大时为平移）</em></div>
+          <div class="help-item"><span><kbd>空格</kbd></span><em>下一张</em></div>
+          <div class="help-item"><span><kbd>Home</kbd><kbd>End</kbd></span><em>首张 / 末张</em></div>
+          <div class="help-item"><span><kbd>鼠标侧键</kbd></span><em>前进 / 后退</em></div>
+          <div class="help-item"><span><kbd>滚轮</kbd></span><em>缩放或翻页（可在设置里切换）</em></div>
+          <div class="help-item"><span><kbd>Backspace</kbd></span><em>上级文件夹</em></div>
+
+          <h3>缩放</h3>
+          <div class="help-item"><span><kbd>+</kbd><kbd>-</kbd></span><em>缩放</em></div>
+          <div class="help-item"><span><kbd>1</kbd></span><em>实际大小</em></div>
+          <div class="help-item"><span><kbd>F</kbd></span><em>适应窗口</em></div>
+          <div class="help-item"><span><kbd>双击</kbd></span><em>适应 ↔ 实际</em></div>
+          <div class="help-item"><span><kbd>拖拽</kbd></span><em>平移（放大时）</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>滚轮</kbd></span><em>缩放（翻页模式下）</em></div>
+
+          <h3>视图</h3>
+          <div class="help-item"><span><kbd>Enter</kbd><kbd>F11</kbd></span><em>全屏灯箱</em></div>
+          <div class="help-item"><span><kbd>M</kbd></span><em>图片外压暗</em></div>
+          <div class="help-item"><span><kbd>B</kbd></span><em>只看图片（隐藏标题栏）</em></div>
+          <div class="help-item"><span><kbd>T</kbd></span><em>胶片条</em></div>
+          <div class="help-item"><span><kbd>I</kbd></span><em>信息浮层</em></div>
+          <div class="help-item"><span><kbd>D</kbd></span><em>详细信息（含直方图）</em></div>
+          <div class="help-item"><span><kbd>C</kbd></span><em>取色（坐标 + 颜色）</em></div>
+          <div class="help-item"><span><kbd>S</kbd></span><em>幻灯片</em></div>
+          <div class="help-item"><span><kbd>?</kbd></span><em>这个面板</em></div>
+
+          <h3>文件</h3>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>O</kbd></span><em>打开图片</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>O</kbd></span><em>打开文件夹</em></div>
+          <div class="help-item"><span><kbd>L</kbd><kbd>R</kbd></span><em>左旋 / 右旋</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>Z</kbd></span><em>撤销旋转</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>C</kbd></span><em>复制图片</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>C</kbd></span><em>复制文件</em></div>
+          <div class="help-item"><span><kbd>Ctrl</kbd><kbd>E</kbd></span><em>另存为 / 导出</em></div>
+          <div class="help-item"><span><kbd>F2</kbd></span><em>重命名</em></div>
+          <div class="help-item"><span><kbd>Delete</kbd></span><em>移入回收站</em></div>
+          <div class="help-item"><span><kbd>Shift</kbd><kbd>Delete</kbd></span><em>彻底删除</em></div>
+          <div class="help-item"><span><kbd>Esc</kbd></span><em>停止幻灯片 / 退出灯箱 / 关闭窗口</em></div>
+        </div>
+        <div class="help-foot">
+          <span id="help-version" class="help-version"></span>
+          <span class="help-foot-actions">
+            <button type="button" id="help-log" class="d-btn">打开日志</button>
+            <button type="button" id="help-close" class="modal-primary">关闭</button>
+          </span>
         </div>
       </div>
     </div>

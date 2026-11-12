@@ -9,6 +9,7 @@ import { SETTINGS_SAVE_DEBOUNCE_MS } from "./config";
 export type SortMode = "name" | "name_desc" | "modified" | "size";
 export type Theme = "dark" | "light" | "system";
 export type RotateMode = "view" | "file";
+export type WheelMode = "zoom" | "page";
 
 /** 仅显示模式的旋转记录（与 Rust RotationMark 对应） */
 export interface RotationMark {
@@ -37,6 +38,12 @@ export interface Settings {
   rotate_mode: RotateMode;
   /** 仅显示模式的旋转记录 */
   rotations: RotationMark[];
+  /** 滚轮行为：缩放 / 翻页 */
+  wheel: WheelMode;
+  /** 启动时自动打开上次的文件夹 */
+  restore_last_dir: boolean;
+  /** 最近打开过的文件夹（最新在前） */
+  recent_dirs: string[];
 }
 
 export const SORT_LABELS: Record<SortMode, string> = {
@@ -55,7 +62,13 @@ const DEFAULTS: Settings = {
   theme: "dark",
   rotate_mode: "view",
   rotations: [],
+  wheel: "zoom",
+  restore_last_dir: false,
+  recent_dirs: [],
 };
+
+/** 最近文件夹上限（与 Rust 侧 RECENT_DIRS_MAX 一致） */
+export const RECENT_DIRS_MAX = 8;
 
 let current: Settings = { ...DEFAULTS };
 let saveTimer = 0;

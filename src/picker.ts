@@ -12,12 +12,21 @@ export function isPicking(): boolean {
 
 /** 弹出文件选择框；取消、出错或已有对话框在显示时返回 null */
 export async function pickImage(): Promise<string | null> {
+  return pick("pick_image", "无法打开文件选择框");
+}
+
+/** 弹出文件夹选择框；语义同上 */
+export async function pickFolder(): Promise<string | null> {
+  return pick("pick_folder", "无法打开文件夹选择框");
+}
+
+async function pick(command: string, errPrefix: string): Promise<string | null> {
   if (picking) return null;
   picking = true;
   try {
-    return (await invoke<string | null>("pick_image")) ?? null;
+    return (await invoke<string | null>(command)) ?? null;
   } catch (e) {
-    toast(`无法打开文件选择框：${String(e)}`);
+    toast(`${errPrefix}：${String(e)}`);
     return null;
   } finally {
     picking = false;

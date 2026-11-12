@@ -16,11 +16,15 @@ import { Exporter } from "./exporter";
 import { SettingsPanel } from "./settingspanel";
 import { applyTheme, watchSystemTheme } from "./theme";
 import { DetailsPanel } from "./details";
-import { isPicking, pickImage } from "./picker";
+import { ContextMenu } from "./contextmenu";
+import { HelpPanel } from "./help";
+import { isPicking, pickFolder, pickImage } from "./picker";
 import { PixelProbe } from "./probe";
 import { TaskQueue } from "./queue";
 import { applyQuarter, clearQuarter, quarterOf, rekeyQuarter, setQuarter } from "./rotation";
-import { getSettings, loadSettings, updateSettings, type SortMode } from "./settings";
+import {
+  RECENT_DIRS_MAX, getSettings, loadSettings, updateSettings, type SortMode,
+} from "./settings";
 import { MoreMenu, copyFiles, copyImage, setWallpaper, type MenuAction } from "./actions";
 import {
   BLOB_URL_POOL_MAX, FULL_LOAD_DEBOUNCE_MS, KEEPALIVE_MS, KEY_PAN_RATIO, KEY_ZOOM_STEP,
@@ -30,7 +34,7 @@ import {
   TIER_MIN_PX, TIER_MIN_VIEWPORT_PX, TIER_SCALE, WHEEL_ZOOM_BASE, ZOOM_INDICATOR_MS,
 } from "./config";
 import {
-  attachIdleHider, dirname, isImageExt, isJpeg, isOpaqueExt, normalizeWheelDelta, pathKey,
+  attachIdleHider, baseName, dirname, isImageExt, isJpeg, isOpaqueExt, normalizeWheelDelta, pathKey,
   peekImageSize, setTitle, toast,
 } from "./util";
 
@@ -232,7 +236,10 @@ type ListResult = { ok: true; list: ImageEntry[] } | { ok: false };
 
 function fetchList(dir: string): Promise<ListResult> {
   return invoke<ImageEntry[]>("list_images", { dir, sort: getSettings().sort }).then(
-    (list): ListResult => ({ ok: true, list }),
+    (list): ListResult => {
+      rememberDir(dir);
+      return { ok: true, list };
+    },
     (): ListResult => ({ ok: false }),
   );
 }
@@ -257,6 +264,60 @@ async function openFileDialog() {
   if (p) void openPath(p);
 }
 
+/** 弹出系统"选择文件夹"对话框并打开该目录 */
+async function openFolderDialog() {
+  if (isPicking()) return;
+  if (slideshow.playing) slideshow.stop();
+  const dir = await pickFolder();
+  if (dir) void openPath(dir);
+}
+
+/** 回到上一级文件夹（Backspace / Alt+↑） */
+async function parentDir() {
+  const base = currentPath() ?? getSettings().recent_dirs[0];
+  if (!base) {
+    toast("还没有打开任何文件夹");
+    return;
+  }
+  const up = dirname(base);
+  if (!up || pathKey(up) === pathKey(base)) {
+    toast("已经是根目录");
+    return;
+  }
+  await openPath(up);
+}
+
+/** 记录最近打开的文件夹（空状态里可以直接再进去） */
+function rememberDir(dir: string) {
+  const list = getSettings().recent_dirs;
+  if (list.length && pathKey(list[0]) === pathKey(dir)) return;
+  const next = [dir, ...list.filter((d) => pathKey(d) !== pathKey(dir))].slice(0, RECENT_DIRS_MAX);
+  updateSettings({ recent_dirs: next });
+}
+
+/** 空状态里的"最近打开"列表 */
+function renderRecentDirs() {
+  const host = document.getElementById("recent-dirs")!;
+  const dirs = getSettings().recent_dirs;
+  host.textContent = "";
+  host.classList.toggle("hidden", dirs.length === 0);
+  for (const dir of dirs) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.title = dir;
+    const name = document.createElement("span");
+    name.className = "recent-name";
+    name.textContent = baseName(dir) || dir;
+    const parent = document.createElement("span");
+    parent.className = "recent-path";
+    const up = dirname(dir);
+    parent.textContent = !up || pathKey(up) === pathKey(dir) ? "—" : up;
+    btn.append(name, parent);
+    btn.addEventListener("click", () => void openPath(dir));
+    host.append(btn);
+  }
+}
+
 /** 打开目录：列出并显示第一张 */
 async function openDirectory(dir: string, myOpen: number) {
   listReady = false;
@@ -266,6 +327,9 @@ async function openDirectory(dir: string, myOpen: number) {
   if (!res.ok) {
     listReady = true;
     setLoading(false);
+    entries = [];
+    index = -1;
+    afterListChange(); // 落到空状态（顺便刷新"最近打开"）
     toast("无法读取该文件夹");
     return;
   }
@@ -409,6 +473,7 @@ function afterListChange() {
   strip.rebuild(entries, currentPath());
   strip.ensureAround(entries, Math.max(0, index));
   emptyEl.classList.toggle("hidden", entries.length > 0);
+  if (!entries.length) renderRecentDirs();
 }
 
 function currentPath(): string | null {
@@ -920,7 +985,25 @@ viewer.onPaint = (pct) => {
 
 // ---------- 交互：滚轮 / 拖拽 / 双击 / 侧键 ----------
 
+/** 翻页模式的滚轮累计与冷却（触控板会连发小 delta） */
+let wheelAcc = 0;
+let lastWheelNavAt = 0;
+
 stage.addEventListener("wheel", (e) => {
+  // 翻页模式：普通滚轮翻页，Ctrl+滚轮仍缩放
+  if (getSettings().wheel === "page" && !e.ctrlKey) {
+    e.preventDefault();
+    const d = normalizeWheelDelta(e);
+    if (!d) return;
+    wheelAcc += d;
+    const now = performance.now();
+    if (Math.abs(wheelAcc) >= 100 && now - lastWheelNavAt > 90) {
+      nav(wheelAcc > 0 ? 1 : -1);
+      wheelAcc = 0;
+      lastWheelNavAt = now;
+    }
+    return;
+  }
   e.preventDefault();
   if (!viewer.view) return;
   // deltaMode 归一化：行/页模式的原始 deltaY 很小或很大，直接套指数会让缩放失灵或跳变
@@ -938,10 +1021,15 @@ let panning = false;
 let lastX = 0, lastY = 0;
 let downX = 0, downY = 0, dragMoved = false;
 
+/** 无边框模式右键用于拖动窗口，此时不弹右键菜单 */
+let suppressContextMenu = false;
+
 stage.addEventListener("pointerdown", (e) => {
+  suppressContextMenu = false;
   // 无边框模式下：右键拖动 = 移动窗口
   if (e.button === 2 && document.body.classList.contains("frameless")) {
     e.preventDefault();
+    suppressContextMenu = true;
     void getCurrentWindow().startDragging();
     return;
   }
@@ -988,7 +1076,65 @@ stage.addEventListener("dblclick", (e) => {
   viewer.toggleFitActual();
 });
 
-stage.addEventListener("contextmenu", (e) => e.preventDefault());
+const contextMenu = new ContextMenu(document.getElementById("context-menu")!);
+
+/** 在资源管理器中定位当前图片 */
+async function revealCurrent() {
+  const p = currentPath();
+  if (!p) return;
+  try {
+    await invoke("reveal_in_explorer", { path: p });
+  } catch (err) {
+    toast(`无法在资源管理器中显示：${String(err)}`);
+  }
+}
+
+/** 复制当前图片的完整路径 */
+async function copyCurrentPath() {
+  const p = currentPath();
+  if (!p) return;
+  try {
+    await navigator.clipboard.writeText(p);
+    toast("已复制完整路径");
+  } catch {
+    toast("复制失败");
+  }
+}
+
+function showContextMenu(x: number, y: number) {
+  const has = currentPath() !== null;
+  /** 每次动作都重新取当前图，避免菜单挂着时切了图 */
+  const withPath = (fn: (path: string, quarter: number) => void) => () => {
+    const p = currentPath();
+    if (p) fn(p, currentQuarter());
+  };
+  contextMenu.show(x, y, [
+    { label: "复制图片", hint: "Ctrl+C", disabled: !has, action: withPath((p, q) => void copyImage(p, q)) },
+    { label: "复制文件", hint: "Ctrl+Shift+C", disabled: !has, action: withPath((p) => void copyFiles([p])) },
+    { label: "另存为 / 导出…", hint: "Ctrl+E", disabled: !has, action: () => exporter.open() },
+    { label: "设为桌面壁纸", disabled: !has, action: withPath((p, q) => void setWallpaper(p, q)) },
+    "separator",
+    { label: "在资源管理器中显示", disabled: !has, action: () => void revealCurrent() },
+    { label: "复制完整路径", disabled: !has, action: () => void copyCurrentPath() },
+    "separator",
+    { label: "打开文件夹…", hint: "Ctrl+Shift+O", action: () => void openFolderDialog() },
+    { label: "设置…", action: () => settingsPanel.open() },
+  ]);
+}
+
+stage.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  if (suppressContextMenu) return; // 无边框模式右键是"移动窗口"
+  showContextMenu(e.clientX, e.clientY);
+});
+
+// 图片区之外（胶片条、面板）不弹 WebView 自带菜单；输入框里保留原生菜单（复制/粘贴）
+document.addEventListener("contextmenu", (e) => {
+  const t = e.target;
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+  if (stage.contains(t as Node)) return; // 舞台自己处理
+  e.preventDefault();
+});
 
 // ---------- 快捷键 ----------
 
@@ -1000,13 +1146,27 @@ function isFormControl(t: EventTarget | null): boolean {
 }
 
 window.addEventListener("keydown", (e) => {
-  // 确认对话框/导出/设置面板自行处理；系统文件选择框显示期间不响应任何快捷键
-  if (modalOpen() || isPicking()) return;
+  // 确认对话框/导出/设置/快捷键面板、右键菜单、⋯ 菜单打开时都不响应全局快捷键
+  if (modalOpen() || isPicking() || contextMenu.isOpen || moreMenu.isOpen) return;
   const meta = e.ctrlKey || e.metaKey;
 
   // 屏蔽 WebView 默认行为
   if (e.key === "F5" || (meta && (e.key === "r" || e.key === "R"))) {
     e.preventDefault();
+    return;
+  }
+
+  // Ctrl+Shift+O：打开文件夹
+  if (meta && !e.altKey && e.shiftKey && (e.key === "o" || e.key === "O")) {
+    e.preventDefault();
+    void openFolderDialog();
+    return;
+  }
+
+  // Alt+↑：上级文件夹
+  if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowUp") {
+    e.preventDefault();
+    void parentDir();
     return;
   }
 
@@ -1065,6 +1225,20 @@ window.addEventListener("keydown", (e) => {
       break;
     case "ArrowDown":
       if (viewer.isZoomed()) { e.preventDefault(); viewer.panBy(0, -stage.clientHeight * KEY_PAN_RATIO); }
+      break;
+    case " ":
+      // 焦点在按钮/输入框上时，空格属于该控件
+      if (isFormControl(e.target)) break;
+      e.preventDefault();
+      nav(1);
+      break;
+    case "Backspace":
+      e.preventDefault();
+      void parentDir();
+      break;
+    case "?":
+      e.preventDefault();
+      help.toggle();
       break;
     case "Home":
       if (entries.length) jumpTo(0);
@@ -1290,6 +1464,7 @@ document.getElementById("btn-rot-cw")!.addEventListener("click", () => void doRo
 // 详情按钮的点击由 DetailsPanel 自己绑定
 document.getElementById("btn-slideshow")!.addEventListener("click", () => slideshow.toggle());
 document.getElementById("btn-open")!.addEventListener("click", () => void openFileDialog());
+document.getElementById("btn-open-folder")!.addEventListener("click", () => void openFolderDialog());
 // 空状态下双击空白处 = 打开文件。#empty 盖在 #stage 之上，双击不会落到舞台的
 // "切换适应/100%"与"点图外退出灯箱"逻辑上；点在按钮上时交给按钮的 click，避免弹两次
 emptyEl.addEventListener("dblclick", (e) => {
@@ -1305,6 +1480,8 @@ document.getElementById("nav-next")!.addEventListener("click", () => nav(1));
 slideshow.onNext = () => nav(1, true);
 slideshow.fullscreenHandler = (on) => void applyFullscreen(on);
 slideshow.isFullscreen = () => getCurrentWindow().isFullscreen();
+
+const help = new HelpPanel();
 
 const settingsPanel = new SettingsPanel({
   setFilmstrip: (v) => strip.setVisible(v),
@@ -1329,7 +1506,19 @@ sortSelect.addEventListener("change", () => {
   void reloadList();
 });
 
-new MoreMenu(moreBtn, moreMenuEl, currentPath, (act: MenuAction) => {
+const moreMenu = new MoreMenu(moreBtn, moreMenuEl, currentPath, (act: MenuAction) => {
+  if (act === "open-file") {
+    void openFileDialog();
+    return;
+  }
+  if (act === "open-folder") {
+    void openFolderDialog();
+    return;
+  }
+  if (act === "shortcuts") {
+    help.open();
+    return;
+  }
   if (act === "export") {
     exporter.open();
     return;
@@ -1439,6 +1628,16 @@ function showWindowWhenReady() {
       return;
     }
   } catch { /* ignore */ }
+
+  // 没有启动参数时，按设置恢复上次浏览的文件夹
+  if (s.restore_last_dir && s.recent_dirs.length) {
+    if (s.lightbox) enterLightbox();
+    showWindowWhenReady();
+    await openPath(s.recent_dirs[0]);
+    return;
+  }
+
+  renderRecentDirs();
   emptyEl.classList.remove("hidden");
   showWindowWhenReady();
 })();

@@ -3,7 +3,9 @@
 // 除"打开即灯箱"（下次打开图片才生效）外，改动立即作用到界面并落盘。
 
 import { Modal } from "./modal";
-import { getSettings, updateSettings, type RotateMode, type SortMode, type Theme } from "./settings";
+import {
+  getSettings, updateSettings, type RotateMode, type SortMode, type Theme, type WheelMode,
+} from "./settings";
 
 export interface SettingsHooks {
   setFilmstrip(v: boolean): void;
@@ -23,6 +25,8 @@ export class SettingsPanel {
   private readonly sortEl = document.getElementById("set-sort") as HTMLSelectElement;
   private readonly themeEl = document.getElementById("set-theme") as HTMLSelectElement;
   private readonly rotateEl = document.getElementById("set-rotate") as HTMLSelectElement;
+  private readonly wheelEl = document.getElementById("set-wheel") as HTMLSelectElement;
+  private readonly restoreEl = document.getElementById("set-restore") as HTMLInputElement;
   private readonly hintEl = document.getElementById("settings-hint")!;
 
   constructor(private readonly hooks: SettingsHooks) {
@@ -63,6 +67,16 @@ export class SettingsPanel {
       updateSettings({ theme });
       this.hooks.setTheme(theme);
     });
+    this.wheelEl.addEventListener("change", () => {
+      updateSettings({ wheel: this.wheelEl.value as WheelMode });
+      this.hint(this.wheelEl.value === "page"
+        ? "滚轮翻页，Ctrl+滚轮缩放"
+        : "滚轮缩放（Ctrl+滚轮也是缩放）");
+    });
+    this.restoreEl.addEventListener("change", () => {
+      updateSettings({ restore_last_dir: this.restoreEl.checked });
+      this.hint(this.restoreEl.checked ? "下次启动会打开最近一次浏览的文件夹" : "下次启动显示空状态");
+    });
     this.rotateEl.addEventListener("change", () => {
       const mode = this.rotateEl.value as RotateMode;
       updateSettings({ rotate_mode: mode });
@@ -92,6 +106,8 @@ export class SettingsPanel {
     this.sortEl.value = s.sort;
     this.themeEl.value = s.theme;
     this.rotateEl.value = s.rotate_mode;
+    this.wheelEl.value = s.wheel;
+    this.restoreEl.checked = s.restore_last_dir;
     this.hintEl.textContent = "";
   }
 

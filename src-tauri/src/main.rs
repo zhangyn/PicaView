@@ -99,8 +99,10 @@ fn main() {
             export::pick_save_path,
             settings::get_settings,
             settings::set_settings,
+            imgscan::log_path,
             cli_args,
             pick_image,
+            pick_folder,
         ])
         .setup(|app| {
             ensure_on_screen(app.handle());
@@ -136,6 +138,34 @@ async fn pick_image(
             .to_string_lossy()
             .into_owned();
         imgscan::checked_image_path(&path)?;
+        Ok(Some(path))
+    })
+    .await
+}
+
+/// 弹出系统"选择文件夹"对话框。用户取消返回 None。
+#[tauri::command]
+async fn pick_folder(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    imgscan::run_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("打开文件夹")
+            .blocking_pick_folder();
+        let Some(dir) = picked else { return Ok(None) };
+        let path = dir
+            .into_path()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        if !std::path::Path::new(&path).is_dir() {
+            return Err("所选路径不是文件夹".into());
+        }
         Ok(Some(path))
     })
     .await

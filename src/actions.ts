@@ -46,7 +46,18 @@ export async function setWallpaper(path: string, quarter = 0): Promise<boolean> 
   }
 }
 
-export type MenuAction = "copy-image" | "copy-file" | "export" | "wallpaper" | "settings";
+export type MenuAction =
+  | "open-file"
+  | "open-folder"
+  | "shortcuts"
+  | "settings"
+  | "copy-image"
+  | "copy-file"
+  | "export"
+  | "wallpaper";
+
+/** 需要"有图片"才可用的菜单项 */
+const IMAGE_ACTIONS = new Set<MenuAction>(["copy-image", "copy-file", "export", "wallpaper"]);
 
 /** 下拉菜单：按钮展开、点外面/Esc/选中后关闭，焦点回到按钮 */
 export class MoreMenu {
@@ -101,12 +112,11 @@ export class MoreMenu {
 
   show() {
     if (this.open) return;
-    // 没有图片时"设置"仍然可用，图片相关的项置灰
+    // 没有图片时，只有图片相关的项置灰；打开/设置/快捷键始终可用
     const has = !!this.getPath();
     for (const el of this.root.querySelectorAll<HTMLButtonElement>("[data-act]")) {
-      const act = el.dataset.act;
-      if (act === "settings") continue;
-      el.disabled = !has;
+      const act = el.dataset.act as MenuAction | undefined;
+      el.disabled = !has && !!act && IMAGE_ACTIONS.has(act);
     }
     this.open = true;
     this.root.classList.remove("hidden");
