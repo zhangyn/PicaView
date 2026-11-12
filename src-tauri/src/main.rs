@@ -99,7 +99,6 @@ fn main() {
             export::pick_save_path,
             settings::get_settings,
             settings::set_settings,
-            imgscan::log_path,
             cli_args,
             pick_image,
             pick_folder,

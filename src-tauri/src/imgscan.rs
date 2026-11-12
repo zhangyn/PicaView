@@ -16,17 +16,6 @@ fn is_error_msg(msg: &str) -> bool {
     msg.contains("FAIL") || msg.contains("OFFSCREEN")
 }
 
-/// 日志文件路径（可能还不存在）；供"打开日志"用
-pub fn log_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    use tauri::Manager;
-    app.path().app_cache_dir().ok().map(|d| d.join("picaview.log"))
-}
-
-#[tauri::command]
-pub fn log_path(app: tauri::AppHandle) -> Option<String> {
-    log_file(&app).map(|p| p.to_string_lossy().into_owned())
-}
-
 /// 诊断日志：追加到 app 缓存目录，超 512KB 重置
 pub fn diag_log(app: &tauri::AppHandle, msg: &str) {
     if !(cfg!(debug_assertions) || is_error_msg(msg)) {

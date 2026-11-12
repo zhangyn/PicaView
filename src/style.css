@@ -155,7 +155,7 @@ html.lightbox #filmstrip {
   left: 50%;
   bottom: 96px;
   transform: translateX(-50%);
-  z-index: 8; /* 高于详细信息面板，复制/定位的提示不被遮住 */
+  z-index: 110; /* 最高层：导出/设置等模态里弹的提示也要看得见（模态遮罩 90、确认框 100） */
   background: var(--ctrl-bg);
   border: 1px solid var(--ctrl-border);
   border-radius: 8px;
